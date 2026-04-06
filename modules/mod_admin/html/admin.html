@@ -1,0 +1,449 @@
+<!--
+  Author: Germán Luis Aracil Boned <garacilb@gmail.com>
+
+  This program is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program; if not, see <https://www.gnu.org/licenses/>.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Portal Admin</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#f8f9fa;--bg2:#fff;--bg3:#e9ecef;--border:#dee2e6;--text:#212529;
+--text2:#6c757d;--accent:#0d6efd;--green:#198754;--red:#dc3545;--orange:#fd7e14;
+--white:#fff;--shadow:0 1px 3px rgba(0,0,0,0.08)}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:var(--bg);color:var(--text);display:flex;height:100vh;overflow:hidden;font-size:14px}
+
+/* Sidebar */
+#sidebar{width:240px;background:var(--bg2);border-right:1px solid var(--border);
+overflow-y:auto;flex-shrink:0;display:flex;flex-direction:column}
+#sidebar h1{padding:14px 16px;font-size:17px;color:var(--accent);border-bottom:1px solid var(--border);
+font-weight:700;letter-spacing:-0.5px}
+#sidebar h1 span{color:var(--text2);font-size:11px;font-weight:400;margin-left:6px}
+.nav-section{padding:6px 0;border-bottom:1px solid var(--border)}
+.nav-section h3{padding:4px 16px;font-size:10px;text-transform:uppercase;color:var(--text2);letter-spacing:1px;font-weight:600}
+.nav-item{display:block;padding:5px 16px 5px 20px;color:var(--text);text-decoration:none;cursor:pointer;
+font-size:13px;border-left:3px solid transparent;transition:all 0.1s}
+.nav-item:hover{background:var(--bg3);color:var(--accent)}
+.nav-item.active{border-left-color:var(--accent);color:var(--accent);background:#e7f1ff;font-weight:600}
+.nav-item .badge{float:right;font-size:10px;padding:1px 6px;border-radius:10px;background:var(--bg3);color:var(--text2)}
+#node-select{margin:6px 12px;padding:5px 8px;background:var(--bg2);color:var(--text);border:1px solid var(--border);
+border-radius:6px;font-size:12px;width:calc(100% - 24px)}
+
+/* Content */
+#content{flex:1;overflow-y:auto;padding:20px;background:var(--bg)}
+.page-title{font-size:20px;font-weight:700;margin-bottom:16px;color:var(--text)}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;
+margin-bottom:14px;box-shadow:var(--shadow)}
+.card h2{font-size:14px;font-weight:600;margin-bottom:10px;color:var(--text);
+padding-bottom:8px;border-bottom:1px solid var(--border)}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:14px}
+.stat{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center}
+.stat .val{font-size:22px;font-weight:700;color:var(--accent)}
+.stat .label{font-size:10px;color:var(--text2);margin-top:2px;text-transform:uppercase;letter-spacing:0.5px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 10px;border-bottom:2px solid var(--border);color:var(--text2);font-size:10px;
+text-transform:uppercase;letter-spacing:0.5px;font-weight:600}
+td{padding:6px 10px;border-bottom:1px solid var(--border)}
+tr:hover{background:#f0f4ff}
+pre{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;
+overflow-x:auto;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-all;
+font-family:'SF Mono',Monaco,'Courier New',monospace}
+.btn{padding:5px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);
+color:var(--text);cursor:pointer;font-size:12px;font-weight:500;transition:all 0.1s}
+.btn:hover{background:var(--bg3)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--white)}
+.btn.primary:hover{background:#0b5ed7}
+.btn.success{background:var(--green);border-color:var(--green);color:var(--white)}
+.btn.danger{background:var(--red);border-color:var(--red);color:var(--white)}
+.btn.sm{padding:3px 8px;font-size:11px}
+input,select,textarea{padding:5px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+color:var(--text);font-size:13px}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none;box-shadow:0 0 0 3px rgba(13,110,253,0.15)}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.tag.on{background:#d1e7dd;color:#0f5132}.tag.off{background:var(--bg3);color:var(--text2)}
+.tag.ok{background:#d1e7dd;color:#0f5132}.tag.err{background:#f8d7da;color:#842029}
+.tag.warn{background:#fff3cd;color:#664d03}
+.flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.path-link{color:var(--accent);cursor:pointer;text-decoration:none}
+.path-link:hover{text-decoration:underline}
+.tabs{display:flex;border-bottom:2px solid var(--border);margin-bottom:12px}
+.tab{padding:6px 16px;cursor:pointer;font-size:13px;color:var(--text2);border-bottom:2px solid transparent;
+margin-bottom:-2px;transition:all 0.1s}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.form-row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.form-row label{min-width:80px;font-size:12px;color:var(--text2);font-weight:500}
+.form-row input{flex:1}
+.hidden{display:none!important}
+
+/* Login */
+#login-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.3);display:flex;align-items:center;
+justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+#login-box{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:32px;
+width:340px;box-shadow:0 8px 32px rgba(0,0,0,0.12)}
+#login-box h2{margin-bottom:16px;color:var(--text);font-size:18px}
+#login-box input{width:100%;margin-bottom:8px;padding:8px 12px}
+#login-box .btn{width:100%;margin-top:8px;padding:8px}
+
+/* Terminal */
+#terminal{background:#1e1e2e;border-radius:8px;border:1px solid var(--border);height:calc(100vh - 80px);
+display:flex;flex-direction:column;font-family:'SF Mono',Monaco,'Courier New',monospace}
+#term-output{flex:1;overflow-y:auto;padding:12px;font-size:13px;line-height:1.5;
+white-space:pre-wrap;word-break:break-all;color:#cdd6f4}
+#term-output .cmd{color:#a6e3a1}
+#term-output .res{color:#cdd6f4}
+#term-output .err{color:#f38ba8}
+#term-input-line{display:flex;padding:4px 12px 12px;align-items:center;border-top:1px solid #313244}
+#term-prompt{color:#a6e3a1;margin-right:8px;white-space:nowrap;font-size:13px}
+#term-input{flex:1;background:transparent;border:none;color:#cdd6f4;font-family:inherit;
+font-size:13px;outline:none;caret-color:#a6e3a1}
+
+/* IoT */
+.device-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.device-card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px;
+text-align:center;box-shadow:var(--shadow);transition:all 0.1s}
+.device-card:hover{box-shadow:0 2px 8px rgba(0,0,0,0.12)}
+.device-card .name{font-weight:600;font-size:13px;margin-bottom:4px}
+.device-card .model{font-size:11px;color:var(--text2)}
+.device-card .state{margin:8px 0}
+.device-card .toggle{width:48px;height:26px;border-radius:13px;border:none;cursor:pointer;
+position:relative;transition:all 0.2s}
+.device-card .toggle.on{background:var(--green)}
+.device-card .toggle.off{background:var(--bg3);border:1px solid var(--border)}
+.device-card .toggle::after{content:'';position:absolute;width:20px;height:20px;border-radius:50%;
+background:var(--white);top:3px;transition:all 0.2s;box-shadow:0 1px 3px rgba(0,0,0,0.2)}
+.device-card .toggle.on::after{right:3px}
+.device-card .toggle.off::after{left:3px}
+
+/* Responsive */
+@media(max-width:768px){#sidebar{width:180px}#content{padding:12px}}
+</style>
+</head>
+<body>
+
+<div id="login-overlay">
+<div id="login-box">
+<h2>Portal Admin</h2>
+<input type="text" id="login-user" placeholder="Username" autofocus>
+<input type="password" id="login-pass" placeholder="Password">
+<button class="btn primary" onclick="doLogin()">Sign In</button>
+<div id="login-err" style="color:var(--red);margin-top:8px;font-size:12px"></div>
+</div>
+</div>
+
+<div id="sidebar">
+<h1>Portal <span id="version"></span></h1>
+<select id="node-select" onchange="switchNode()"><option value="">Local</option></select>
+<div class="nav-section">
+<h3>System</h3>
+<a class="nav-item active" onclick="page('dash')">Dashboard</a>
+<a class="nav-item" onclick="page('nodes')">Nodes</a>
+<a class="nav-item" onclick="page('iot')">IoT Devices</a>
+<a class="nav-item" onclick="page('users')">Users</a>
+<a class="nav-item" onclick="page('locks')">Locks</a>
+<a class="nav-item" onclick="page('config')">Config</a>
+<a class="nav-item" onclick="page('logs')">Audit Log</a>
+<a class="nav-item" onclick="page('term')">Terminal</a>
+</div>
+<div class="nav-section">
+<h3>Modules</h3>
+<div id="mod-list"></div>
+</div>
+</div>
+
+<div id="content"></div>
+
+<script>
+/* ===== Core ===== */
+let NP='',mods=[],user='',BA='';
+const A='/api';
+
+function api(p,m='GET'){
+  const u=NP?`${A}/${NP}${p}`:`${A}${p}`;
+  const h={};if(BA)h['Authorization']='Basic '+BA;
+  return fetch(u,{method:m,headers:h}).then(r=>r.text()).catch(()=>'(unavailable)');
+}
+function E(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+/* ===== Auth ===== */
+async function doLogin(){
+  const u=$('login-user').value,p=$('login-pass').value;
+  const r=await fetch(`${A}/auth/login?username=${encodeURIComponent(u)}&password=${encodeURIComponent(p)}`,{method:'PUT'});
+  const t=await r.text();
+  if(r.ok&&t.trim().length>0&&!t.includes('failed')&&!t.includes('error')){
+    user=u;BA=btoa(u+':'+p);$('login-overlay').classList.add('hidden');init();
+  } else $('login-err').textContent='Login failed';
+}
+$('login-pass')?.addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+$('login-user')?.addEventListener('keydown',e=>{if(e.key==='Enter')$('login-pass').focus()});
+
+/* ===== Init ===== */
+async function init(){
+  const s=await api('/core/status');
+  const v=s.match(/Portal (v[\d.]+)/);
+  $('version').textContent=v?v[1]:'';
+  const ml=await api('/core/modules');
+  mods=[];
+  ml.split('\n').forEach(l=>{const m=l.trim().match(/^(\S+)\s+(v\S+)\s+(.+)/);if(m)mods.push({n:m[1],v:m[2],d:m[3]})});
+  $('mod-list').innerHTML=mods.map(m=>`<a class="nav-item" onclick="page('mod','${m.n}')">${m.n}<span class="badge">${m.v}</span></a>`).join('');
+  // Peers
+  const pp=await api('/node/resources/peers');
+  const sel=$('node-select');sel.innerHTML='<option value="">Local</option>';
+  const seen={};
+  pp.split('\n').forEach(l=>{const m=l.trim().match(/^\s*(\S+)\s+\S+\s+\[(ready|connecting)\]/);
+    if(m&&!seen[m[1]]){seen[m[1]]=1;sel.innerHTML+=`<option value="${m[1]}"${m[1]===NP?' selected':''}>${m[1]}</option>`}});
+  sel.value=NP;
+  page('dash');
+}
+function switchNode(){NP=$('node-select').value;init()}
+function $(id){return document.getElementById(id)}
+
+/* ===== Page Router ===== */
+function page(name,arg){
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  event?.target?.classList?.add('active');
+  const pages={dash:pgDash,nodes:pgNodes,iot:pgIoT,users:pgUsers,locks:pgLocks,
+    config:pgConfig,logs:pgLogs,term:pgTerm,mod:pgMod};
+  (pages[name]||pgDash)(arg);
+}
+
+/* ===== Reusable: render table from text ===== */
+function renderTable(text){
+  const lines=text.split('\n').filter(l=>l.trim());
+  if(lines.length<2)return`<pre>${E(text)}</pre>`;
+  let html='<table>';
+  lines.forEach((l,i)=>{
+    const cells=l.split(/\s{2,}/).map(c=>c.trim()).filter(c=>c);
+    if(i===0)html+='<tr>'+cells.map(c=>`<th>${E(c)}</th>`).join('')+'</tr>';
+    else if(!l.match(/^[\s-]+$/))html+='<tr>'+cells.map(c=>`<td>${E(c)}</td>`).join('')+'</tr>';
+  });
+  return html+'</table>';
+}
+
+/* ===== Reusable: card ===== */
+function card(title,content){return`<div class="card"><h2>${title}</h2>${content}</div>`}
+
+/* ===== Reusable: fetch and show ===== */
+async function fetchShow(path,el){
+  const r=await api(path);
+  $(el).innerHTML=`<pre>${E(r)}</pre>`;
+  $(el).classList.remove('hidden');
+}
+
+/* ===== Dashboard ===== */
+async function pgDash(){
+  const[s,mem,load]=await Promise.all([api('/core/status'),api('/metrics/resources/memory'),api('/metrics/resources/load')]);
+  const ms=s.match(/Modules loaded: (\d+)/),ps=s.match(/Paths registered: (\d+)/);
+  const mu=mem.match(/Used:.*\((\d+\.\d+)%\)/),la=load.match(/Load average: ([\d.]+)/),up=load.match(/Uptime: (.+)/);
+  $('content').innerHTML=`
+    <div class="page-title">Dashboard${NP?' — '+NP:''}</div>
+    <div class="cards">
+      <div class="stat"><div class="val">${ms?ms[1]:'-'}</div><div class="label">Modules</div></div>
+      <div class="stat"><div class="val">${ps?ps[1]:'-'}</div><div class="label">Paths</div></div>
+      <div class="stat"><div class="val">${mu?mu[1]+'%':'-'}</div><div class="label">Memory</div></div>
+      <div class="stat"><div class="val">${la?la[1]:'-'}</div><div class="label">Load</div></div>
+      <div class="stat"><div class="val">${up?up[1]:'-'}</div><div class="label">Uptime</div></div>
+    </div>
+    ${card('Modules','<table><tr><th>Name</th><th>Version</th><th>Description</th></tr>'+
+      mods.map(m=>`<tr><td><a class="path-link" onclick="page('mod','${m.n}')">${m.n}</a></td><td>${m.v}</td><td>${m.d}</td></tr>`).join('')+'</table>')}`;
+}
+
+/* ===== Nodes ===== */
+async function pgNodes(){
+  const[st,pp]=await Promise.all([api('/node/resources/status'),api('/node/resources/peers')]);
+  $('content').innerHTML=`
+    <div class="page-title">Federation</div>
+    ${card('This Node','<pre>'+E(st)+'</pre>')}
+    ${card('Peers',renderTable(pp))}
+    ${card('Ping','<button class="btn primary" onclick="doPing()">Ping All</button><pre id="ping-r" style="margin-top:8px"></pre>')}`;
+}
+async function doPing(){$('ping-r').textContent=await api('/node/functions/ping?name=all','PUT')}
+
+/* ===== IoT ===== */
+async function pgIoT(){
+  const d=await api('/iot/resources/devices');
+  const lines=d.split('\n').filter(l=>l.trim()&&!l.match(/^[\s-]+$/)&&!l.startsWith('NAME'));
+  const devices=lines.map(l=>{
+    const p=l.match(/^(.{16})\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)/);
+    return p?{name:p[1].trim(),model:p[2],state:p[3],power:p[4],ip:p[5],mac:p[6],brand:p[7],id:p[8]}:null;
+  }).filter(Boolean);
+
+  let grid=devices.map(d=>{
+    const on=d.state==='ON';
+    const isPlug=d.model.startsWith('P');
+    const isBulb=d.model.startsWith('L');
+    let controls='';
+    if(isPlug||isBulb)
+      controls=`<button class="toggle ${on?'on':'off'}" onclick="iotToggle('${d.id}',${on})"></button>`;
+    if(isBulb)
+      controls+=`<div style="margin-top:6px"><input type="color" value="#0000ff" onchange="iotColor('${d.id}',this.value)" style="width:32px;height:24px;border:none;cursor:pointer"></div>`;
+    return`<div class="device-card">
+      <div class="name">${E(d.name)}</div>
+      <div class="model">${d.model} · ${d.ip}</div>
+      <div class="state">${controls||`<span class="tag ${d.state==='ON'?'on':'off'}">${d.state}</span>`}</div>
+      <div style="font-size:10px;color:var(--text2)">${d.id}</div>
+    </div>`;
+  }).join('');
+
+  $('content').innerHTML=`
+    <div class="page-title">IoT Devices</div>
+    <div class="flex" style="margin-bottom:12px">
+      <button class="btn primary" onclick="iotRefresh()">Refresh All</button>
+      <button class="btn" onclick="pgIoT()">Reload</button>
+    </div>
+    <div class="device-grid">${grid||'<p>No devices</p>'}</div>`;
+}
+async function iotToggle(id,on){
+  await api('/iot/functions/'+(on?'off':'on')+'?name='+encodeURIComponent(id),'PUT');
+  pgIoT();
+}
+async function iotRefresh(){await api('/iot/functions/refresh','PUT');setTimeout(pgIoT,8000)}
+async function iotColor(id,hex){
+  const r=parseInt(hex.substr(1,2),16),g=parseInt(hex.substr(3,2),16),b=parseInt(hex.substr(5,2),16);
+  await api('/iot/functions/bulb?name='+encodeURIComponent(id)+'&cmd=rgb'+r+','+g+','+b,'PUT');
+}
+
+/* ===== Users ===== */
+async function pgUsers(){
+  const[u,g]=await Promise.all([api('/users'),api('/groups')]);
+  $('content').innerHTML=`<div class="page-title">Users & Groups</div>
+    ${card('Users','<pre>'+E(u)+'</pre>')}${card('Groups','<pre>'+E(g)+'</pre>')}`;
+}
+
+/* ===== Locks ===== */
+async function pgLocks(){
+  const l=await api('/core/locks');
+  $('content').innerHTML=`<div class="page-title">Resource Locks</div>${card('Active Locks','<pre>'+E(l)+'</pre>')}`;
+}
+
+/* ===== Config ===== */
+async function pgConfig(){
+  const c=await api('/core/config/list');
+  $('content').innerHTML=`<div class="page-title">Configuration</div>${card('All Config','<pre>'+E(c)+'</pre>')}`;
+}
+
+/* ===== Logs ===== */
+async function pgLogs(){
+  const l=await api('/audit/resources/log');
+  $('content').innerHTML=`<div class="page-title">Audit Log</div>${card('Recent Events','<pre>'+E(l)+'</pre>')}`;
+}
+
+/* ===== Module Detail ===== */
+async function pgMod(name){
+  const[st,rls,fls]=await Promise.all([
+    api('/'+name+'/resources/status'),
+    api('/core/ls?prefix=/'+name+'/resources'),
+    api('/core/ls?prefix=/'+name+'/functions')
+  ]);
+  const resources=rls.split('\n').map(l=>l.trim().match(/^(\S+)/)).filter(m=>m&&m[1]!=='Children'&&m[1]!=='(empty)').map(m=>m[1]);
+  const functions=fls.split('\n').map(l=>l.trim().match(/^(\S+)/)).filter(m=>m&&m[1]!=='Children'&&m[1]!=='(empty)').map(m=>m[1]);
+
+  $('content').innerHTML=`
+    <div class="page-title">${E(name)}</div>
+    ${card('Status','<pre>'+E(st)+'</pre>')}
+    ${card('Resources','<table><tr><th>Path</th><th></th></tr>'+
+      resources.map(r=>`<tr><td><a class="path-link" onclick="modGet('/${name}/resources/${r}')">/${name}/resources/${r}</a></td>
+        <td><button class="btn sm" onclick="modGet('/${name}/resources/${r}')">GET</button></td></tr>`).join('')+'</table>')}
+    ${card('Functions','<table><tr><th>Path</th><th></th></tr>'+
+      functions.map(f=>`<tr><td>/${name}/functions/${f}</td>
+        <td><button class="btn sm primary" onclick="modCall('/${name}/functions/${f}')">CALL</button></td></tr>`).join('')+'</table>')}
+    <div id="mod-result" class="card hidden"><h2>Result</h2><pre id="mod-result-body"></pre></div>`;
+}
+async function modGet(p){$('mod-result-body').textContent=await api(p);$('mod-result').classList.remove('hidden')}
+async function modCall(p){
+  const params=prompt('Parameters (key=value&key2=value2):','');
+  const url=params?p+'?'+params:p;
+  $('mod-result-body').textContent=await api(url,'PUT');
+  $('mod-result').classList.remove('hidden');
+}
+
+/* ===== Terminal ===== */
+let TH=[],THI=-1,TCW='/';
+function pgTerm(){
+  $('content').innerHTML=`<div id="terminal"><div id="term-output"></div>
+    <div id="term-input-line"><span id="term-prompt">portal:/&gt; </span>
+    <input id="term-input" type="text" autofocus spellcheck="false" onkeydown="TK(event)"></div></div>`;
+  $('term-input').focus();
+  TW('Portal Web Terminal. Type "help" for commands.\n','res');
+}
+function TW(t,c){const o=$('term-output');if(!o)return;const s=document.createElement('span');s.className=c||'res';s.textContent=t;o.appendChild(s);o.scrollTop=o.scrollHeight}
+function nodeApi(p,m){
+  /* If CWD is a remote node (e.g. /ssip841), prefix API calls */
+  if(TCW.length>1){
+    const node=TCW.split('/')[1];
+    if(node&&mods.every(x=>x.n!==node))return api('/'+node+p,m);
+  }
+  return api(p,m);
+}
+async function TE(cmd){
+  cmd=cmd.trim();if(!cmd)return;TH.push(cmd);THI=TH.length;
+  TW('portal:'+TCW+'> '+cmd+'\n','cmd');
+  let r='';
+  try{
+    if(cmd==='help')r='Commands: get ls status modules ping node iot locks config help <module>\nTab=autocomplete\n';
+    else if(cmd.startsWith('help ')){const w=cmd.substring(5).trim();const m=mods.find(x=>x.n===w);
+      if(m){r=`${m.n} ${m.v} — ${m.d}\n`;const rl=await api('/core/ls?prefix=/'+w+'/resources');const fl=await api('/core/ls?prefix=/'+w+'/functions');r+='Resources:\n'+rl+'\nFunctions:\n'+fl+'\n'}
+      else r=await api(w.startsWith('/')?w:'/'+w)}
+    else if(cmd==='status')r=await nodeApi('/core/status');
+    else if(cmd==='modules')r=await nodeApi('/core/modules');
+    else if(cmd.startsWith('ls')){const p=cmd.length>3?cmd.substring(3).trim():'/';
+      r=await nodeApi('/core/ls?prefix='+encodeURIComponent(p))}
+    else if(cmd.startsWith('get '))r=await nodeApi(cmd.substring(4).trim());
+    else if(cmd.startsWith('ping')){const n=cmd.length>5?cmd.substring(5).trim():'all';r=await nodeApi('/node/functions/ping?name='+encodeURIComponent(n),'PUT')}
+    else if(cmd==='node'||cmd==='node status')r=await nodeApi('/node/resources/status');
+    else if(cmd==='node peers')r=await nodeApi('/node/resources/peers');
+    else if(cmd==='locks')r=await nodeApi('/core/locks');
+    else if(cmd.startsWith('iot ')){const p=cmd.split(/\s+/);
+      if(p[1]==='devices')r=await nodeApi('/iot/resources/devices');
+      else if(p[1]==='on'&&p[2])r=await nodeApi('/iot/functions/on?name='+encodeURIComponent(p[2]),'PUT');
+      else if(p[1]==='off'&&p[2])r=await nodeApi('/iot/functions/off?name='+encodeURIComponent(p[2]),'PUT');
+      else if(p[1]==='status'&&p[2])r=await nodeApi('/iot/functions/status?name='+encodeURIComponent(p[2]),'PUT');
+      else if(p[1]==='refresh')r=await nodeApi('/iot/functions/refresh','PUT');
+      else if(p[1]==='bulb'&&p[2]&&p[3])r=await nodeApi('/iot/functions/bulb?name='+encodeURIComponent(p[3])+'&cmd='+encodeURIComponent(p[2]),'PUT');
+      else r=await nodeApi('/iot/resources/'+p[1])}
+    else if(cmd.startsWith('cd ')){TCW=cmd.substring(3).trim();if(!TCW.startsWith('/'))TCW='/'+TCW;r=''}
+    else if(cmd==='pwd')r=TCW+'\n';
+    else{if(cmd.startsWith('/'))r=await api(cmd);else r=await api('/'+cmd)}
+    if(r)TW(r+(r.endsWith('\n')?'':'\n'),'res');
+  }catch(e){TW('Error: '+e.message+'\n','err')}
+  const pr=$('term-prompt');if(pr)pr.innerHTML='portal:'+E(TCW)+'&gt; ';
+}
+let LT=0,LTV='';
+async function TC(input){
+  const now=Date.now(),val=input.value,dbl=(now-LT<500&&LTV===val);LT=now;LTV=val;
+  const cmds=['get','ls','status','modules','ping','node','locks','iot','help','pwd','cd','config','cache','cron','kv','firewall','dns','backup'];
+  const subs={node:['peers','status','ping','geolocate'],iot:['devices','status','on','off','toggle','refresh','bulb','vacuum','children'],
+    config:['get','set','list'],cache:['get','set','del','keys'],kv:['get','set','del','keys']};
+  const parts=val.split(/\s+/),word=parts[parts.length-1]||'',pfx=parts.slice(0,-1).join(' ');
+  if(parts.length<=1){const mt=cmds.filter(c=>c.startsWith(word));
+    if(mt.length===1){input.value=mt[0]+' ';LTV=input.value;return}
+    if(mt.length>1&&dbl){TW('\n'+mt.join('  ')+'\n','res');LTV='';return}
+    if(mt.length>1){let cm=mt[0];for(let i=1;i<mt.length;i++)while(cm&&!mt[i].startsWith(cm))cm=cm.slice(0,-1);if(cm.length>word.length){input.value=cm;LTV=input.value}}return}
+  if(parts.length===2&&subs[parts[0]]){const mt=subs[parts[0]].filter(s=>s.startsWith(word));
+    if(mt.length===1){input.value=pfx+' '+mt[0]+' ';LTV=input.value;return}
+    if(mt.length>1&&dbl){TW('\n'+mt.join('  ')+'\n','res');LTV='';return}return}
+}
+function TK(e){const i=$('term-input');
+  if(e.key==='Tab'){e.preventDefault();TC(i)}
+  else if(e.key==='Enter'){const c=i.value;i.value='';TE(c)}
+  else if(e.key==='ArrowUp'){e.preventDefault();if(THI>0){THI--;i.value=TH[THI]}}
+  else if(e.key==='ArrowDown'){e.preventDefault();if(THI<TH.length-1){THI++;i.value=TH[THI]}else{THI=TH.length;i.value=''}}}
+</script>
+</body>
+</html>

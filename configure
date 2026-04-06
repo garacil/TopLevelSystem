@@ -1,0 +1,387 @@
+#!/bin/bash
+#
+# Author: Germán Luis Aracil Boned <garacilb@gmail.com>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, see <https://www.gnu.org/licenses/>.
+#
+
+# =============================================================================
+# Portal v1.0.0 — Configure Script
+# =============================================================================
+#
+# Detects available libraries and generates config.mk for the build.
+# Enables/disables optional modules based on what's installed.
+#
+# Usage:
+#   ./configure                 # Auto-detect everything
+#   ./configure --without-psql  # Disable PostgreSQL module
+#   ./configure --help          # Show all options
+# =============================================================================
+
+set -e
+
+# Defaults
+PREFIX="/usr/local"
+SYSCONFDIR="/etc/portal"
+CC="${CC:-gcc}"
+ENABLE_PSQL=auto
+ENABLE_SQLITE=auto
+ENABLE_LUA=auto
+ENABLE_PYTHON=auto
+ENABLE_SSH=auto
+ENABLE_SSL=auto
+ENABLE_LZMA=auto
+ENABLE_ZLIB=auto
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+ok()   { printf "  ${GREEN}yes${NC}  %s\n" "$1"; }
+no()   { printf "  ${YELLOW}no${NC}   %s\n" "$1"; }
+fail() { printf "  ${RED}FAIL${NC} %s\n" "$1"; }
+
+# --- Parse arguments ---
+for arg in "$@"; do
+    case "$arg" in
+        --prefix=*)       PREFIX="${arg#*=}" ;;
+        --sysconfdir=*)   SYSCONFDIR="${arg#*=}" ;;
+        --with-psql)      ENABLE_PSQL=yes ;;
+        --without-psql)   ENABLE_PSQL=no ;;
+        --with-sqlite)    ENABLE_SQLITE=yes ;;
+        --without-sqlite) ENABLE_SQLITE=no ;;
+        --with-lua)       ENABLE_LUA=yes ;;
+        --without-lua)    ENABLE_LUA=no ;;
+        --with-python)    ENABLE_PYTHON=yes ;;
+        --without-python) ENABLE_PYTHON=no ;;
+        --with-ssh)       ENABLE_SSH=yes ;;
+        --without-ssh)    ENABLE_SSH=no ;;
+        --without-ssl)    ENABLE_SSL=no ;;
+        --without-lzma)   ENABLE_LZMA=no ;;
+        --without-zlib)   ENABLE_ZLIB=no ;;
+        --help|-h)
+            echo "Portal configure script"
+            echo ""
+            echo "Usage: ./configure [options]"
+            echo ""
+            echo "Installation:"
+            echo "  --prefix=DIR          Install prefix (default: /usr/local)"
+            echo "  --sysconfdir=DIR      Config directory (default: /etc/portal)"
+            echo ""
+            echo "Optional features (auto-detected by default):"
+            echo "  --with-psql           Force enable PostgreSQL module"
+            echo "  --without-psql        Disable PostgreSQL module"
+            echo "  --with-sqlite         Force enable SQLite module"
+            echo "  --without-sqlite      Disable SQLite module"
+            echo "  --with-lua            Force enable Lua scripting"
+            echo "  --without-lua         Disable Lua scripting"
+            echo "  --with-python         Force enable Python scripting"
+            echo "  --without-python      Disable Python scripting"
+            echo "  --with-ssh            Force enable SSH module"
+            echo "  --without-ssh         Disable SSH module"
+            echo "  --without-ssl         Disable TLS/HTTPS"
+            echo "  --without-lzma        Disable XZ compression"
+            echo "  --without-zlib        Disable Gzip compression"
+            echo ""
+            echo "Environment variables:"
+            echo "  CC                    C compiler (default: gcc)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg (try --help)"
+            exit 1
+            ;;
+    esac
+done
+
+echo ""
+echo -e "${CYAN}Portal v1.0.0 — Configuration${NC}"
+echo "=============================="
+echo ""
+
+# --- Check compiler ---
+echo "Checking compiler..."
+if command -v "$CC" > /dev/null 2>&1; then
+    CC_VERSION=$($CC --version 2>&1 | head -1)
+    ok "$CC ($CC_VERSION)"
+else
+    fail "No C compiler found. Install gcc: apt install gcc"
+    exit 1
+fi
+
+# --- Check required tools ---
+echo "Checking required tools..."
+for tool in make install; do
+    if command -v $tool > /dev/null 2>&1; then
+        ok "$tool"
+    else
+        fail "$tool not found"
+        exit 1
+    fi
+done
+
+# --- Check required headers ---
+echo "Checking required headers..."
+check_header() {
+    echo "#include <$1>" | $CC -E -x c - > /dev/null 2>&1
+}
+
+for hdr in stdio.h stdlib.h string.h pthread.h dlfcn.h sys/socket.h arpa/inet.h; do
+    if check_header "$hdr"; then
+        ok "$hdr"
+    else
+        fail "$hdr — install build-essential"
+        exit 1
+    fi
+done
+
+# --- Check libraries ---
+echo ""
+echo "Checking optional libraries..."
+
+check_lib() {
+    echo "int main(){return 0;}" | $CC -x c - -o /dev/null $@ 2>/dev/null
+}
+
+check_pkg() {
+    pkg-config --exists "$1" 2>/dev/null
+}
+
+# SQLite
+HAS_SQLITE=no
+SQLITE_CFLAGS=""
+SQLITE_LIBS="-lsqlite3"
+if [ "$ENABLE_SQLITE" != "no" ]; then
+    if check_lib -lsqlite3; then
+        HAS_SQLITE=yes
+        ok "sqlite3"
+    elif [ "$ENABLE_SQLITE" = "yes" ]; then
+        fail "sqlite3 requested but not found — apt install libsqlite3-dev"
+        exit 1
+    else
+        no "sqlite3 (apt install libsqlite3-dev)"
+    fi
+fi
+
+# PostgreSQL
+HAS_PSQL=no
+PSQL_CFLAGS=""
+PSQL_LIBS="-lpq"
+if [ "$ENABLE_PSQL" != "no" ]; then
+    if command -v pg_config > /dev/null 2>&1; then
+        PSQL_CFLAGS="-I$(pg_config --includedir)"
+        HAS_PSQL=yes
+        ok "libpq ($(pg_config --version))"
+    elif check_lib -lpq; then
+        HAS_PSQL=yes
+        ok "libpq"
+    elif [ "$ENABLE_PSQL" = "yes" ]; then
+        fail "libpq requested but not found — apt install libpq-dev"
+        exit 1
+    else
+        no "libpq (apt install libpq-dev)"
+    fi
+fi
+
+# OpenSSL
+HAS_SSL=no
+SSL_LIBS="-lssl -lcrypto"
+if [ "$ENABLE_SSL" != "no" ]; then
+    if check_lib -lssl -lcrypto; then
+        HAS_SSL=yes
+        ok "openssl"
+    else
+        no "openssl (apt install libssl-dev)"
+    fi
+fi
+
+# libssh
+HAS_SSH=no
+SSH_LIBS="-lssh"
+if [ "$ENABLE_SSH" != "no" ]; then
+    if check_lib -lssh; then
+        HAS_SSH=yes
+        ok "libssh"
+    elif [ "$ENABLE_SSH" = "yes" ]; then
+        fail "libssh requested but not found — apt install libssh-dev"
+        exit 1
+    else
+        no "libssh (apt install libssh-dev)"
+    fi
+fi
+
+# Lua
+HAS_LUA=no
+LUA_CFLAGS=""
+LUA_LIBS=""
+if [ "$ENABLE_LUA" != "no" ]; then
+    # Try lua5.4, then lua5.3, then lua
+    for v in lua5.4 lua5.3 lua; do
+        if pkg-config --exists "$v" 2>/dev/null; then
+            LUA_CFLAGS=$(pkg-config --cflags "$v")
+            LUA_LIBS=$(pkg-config --libs "$v")
+            HAS_LUA=yes
+            ok "$v ($(pkg-config --modversion "$v"))"
+            break
+        fi
+    done
+    if [ "$HAS_LUA" = "no" ]; then
+        # Try direct
+        for inc in /usr/include/lua5.4 /usr/include/lua5.3 /usr/include/lua; do
+            if [ -f "$inc/lua.h" ]; then
+                lib=$(basename "$inc" | tr . '')
+                LUA_CFLAGS="-I$inc"
+                LUA_LIBS="-l$lib"
+                HAS_LUA=yes
+                ok "lua ($inc)"
+                break
+            fi
+        done
+    fi
+    if [ "$HAS_LUA" = "no" ]; then
+        if [ "$ENABLE_LUA" = "yes" ]; then
+            fail "Lua requested but not found — apt install liblua5.4-dev"
+            exit 1
+        fi
+        no "lua (apt install liblua5.4-dev)"
+    fi
+fi
+
+# Python
+HAS_PYTHON=no
+PYTHON_CFLAGS=""
+PYTHON_LIBS=""
+if [ "$ENABLE_PYTHON" != "no" ]; then
+    if command -v python3-config > /dev/null 2>&1; then
+        PYTHON_CFLAGS=$(python3-config --includes 2>/dev/null)
+        PYTHON_LIBS=$(python3-config --ldflags --embed 2>/dev/null || python3-config --ldflags 2>/dev/null)
+        # Find the python library name
+        PYLIB=$(python3 -c "import sys; print(f'python{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+        if [ -n "$PYLIB" ]; then
+            PYTHON_LIBS="$PYTHON_LIBS -l$PYLIB"
+        fi
+        HAS_PYTHON=yes
+        PYVER=$(python3 --version 2>&1)
+        ok "python3 ($PYVER)"
+    elif [ "$ENABLE_PYTHON" = "yes" ]; then
+        fail "Python requested but not found — apt install python3-dev"
+        exit 1
+    else
+        no "python3 (apt install python3-dev)"
+    fi
+fi
+
+# liblzma (XZ)
+HAS_LZMA=no
+LZMA_LIBS="-llzma"
+if [ "$ENABLE_LZMA" != "no" ]; then
+    if check_lib -llzma; then
+        HAS_LZMA=yes
+        ok "liblzma"
+    else
+        no "liblzma (apt install liblzma-dev)"
+    fi
+fi
+
+# zlib
+HAS_ZLIB=no
+ZLIB_LIBS="-lz"
+if [ "$ENABLE_ZLIB" != "no" ]; then
+    if check_lib -lz; then
+        HAS_ZLIB=yes
+        ok "zlib"
+    else
+        no "zlib (apt install zlib1g-dev)"
+    fi
+fi
+
+# --- Count enabled modules ---
+echo ""
+echo "Module summary..."
+CORE_MODS="cli node hello myapp cache health cron json http_client worker metrics audit scheduler shm queue email file serial kv firewall crypto validator proxy dns webhook process sysinfo log backup template gpio api_gateway acme admin"
+OPT_MODS=""
+DISABLED_MODS=""
+TOTAL=33  # core modules always built
+
+[ "$HAS_SSL" = "yes" ]    && OPT_MODS="$OPT_MODS web"       && TOTAL=$((TOTAL+1)) || DISABLED_MODS="$DISABLED_MODS web"
+[ "$HAS_SSL" = "yes" ]    && OPT_MODS="$OPT_MODS http_client" || true  # http_client uses SSL
+[ "$HAS_SSH" = "yes" ]    && OPT_MODS="$OPT_MODS ssh"        && TOTAL=$((TOTAL+1)) || DISABLED_MODS="$DISABLED_MODS ssh"
+[ "$HAS_SQLITE" = "yes" ] && OPT_MODS="$OPT_MODS config_sqlite" && TOTAL=$((TOTAL+1)) || DISABLED_MODS="$DISABLED_MODS config_sqlite"
+[ "$HAS_PSQL" = "yes" ]   && OPT_MODS="$OPT_MODS config_psql" && TOTAL=$((TOTAL+1)) || DISABLED_MODS="$DISABLED_MODS config_psql"
+[ "$HAS_LUA" = "yes" ]    && OPT_MODS="$OPT_MODS logic_lua"  && TOTAL=$((TOTAL+1)) || DISABLED_MODS="$DISABLED_MODS logic_lua"
+[ "$HAS_PYTHON" = "yes" ] && OPT_MODS="$OPT_MODS logic_python" && TOTAL=$((TOTAL+1)) || DISABLED_MODS="$DISABLED_MODS logic_python"
+[ "$HAS_LZMA" = "yes" ]   && OPT_MODS="$OPT_MODS xz"        && TOTAL=$((TOTAL+1)) || DISABLED_MODS="$DISABLED_MODS xz"
+[ "$HAS_ZLIB" = "yes" ]   && OPT_MODS="$OPT_MODS gzip"      && TOTAL=$((TOTAL+1)) || DISABLED_MODS="$DISABLED_MODS gzip"
+# websocket uses embedded SHA-256, mqtt uses no external libs
+# logic_c uses gcc (always available), logic_pascal needs fpc
+TOTAL=$((TOTAL+2))  # websocket + mqtt
+OPT_MODS="$OPT_MODS logic_c logic_pascal websocket mqtt"
+TOTAL=$((TOTAL+2))  # logic_c + logic_pascal
+
+ok "$TOTAL modules will be built"
+[ -n "$DISABLED_MODS" ] && no "Disabled:$DISABLED_MODS"
+
+# --- Generate config.mk ---
+echo ""
+echo "Generating config.mk..."
+
+cat > config.mk << CONF
+# Generated by ./configure — $(date)
+# Do not edit manually. Re-run ./configure to regenerate.
+
+PREFIX      = $PREFIX
+SYSCONFDIR  = $SYSCONFDIR
+CC          = $CC
+
+# Detected libraries
+HAS_SQLITE  = $HAS_SQLITE
+HAS_PSQL    = $HAS_PSQL
+HAS_SSL     = $HAS_SSL
+HAS_SSH     = $HAS_SSH
+HAS_LUA     = $HAS_LUA
+HAS_PYTHON  = $HAS_PYTHON
+HAS_LZMA    = $HAS_LZMA
+HAS_ZLIB    = $HAS_ZLIB
+
+# Library flags
+SQLITE_LIBS  = $SQLITE_LIBS
+PSQL_CFLAGS  = $PSQL_CFLAGS
+PSQL_LIBS    = $PSQL_LIBS
+SSL_LIBS     = $SSL_LIBS
+SSH_LIBS     = $SSH_LIBS
+LUA_CFLAGS   = $LUA_CFLAGS
+LUA_LIBS     = $LUA_LIBS
+PYTHON_CFLAGS = $PYTHON_CFLAGS
+PYTHON_LIBS  = $PYTHON_LIBS
+LZMA_LIBS    = $LZMA_LIBS
+ZLIB_LIBS    = $ZLIB_LIBS
+CONF
+
+ok "config.mk written"
+
+echo ""
+echo -e "${GREEN}Configuration complete.${NC}"
+echo ""
+echo "  Modules: $TOTAL"
+echo "  Prefix:  $PREFIX"
+echo "  Config:  $SYSCONFDIR"
+echo ""
+echo "  Next steps:"
+echo "    make clean && make"
+echo "    make tests"
+echo "    make install"
+echo ""
