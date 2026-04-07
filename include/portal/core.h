@@ -1,21 +1,4 @@
 /*
- * Author: Germán Luis Aracil Boned <garacilb@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
  * core.h — The core API struct that every module receives
  *
  * Contains function pointers for path registration, message routing,
@@ -39,6 +22,15 @@ typedef void (*portal_fd_fn)(int fd, uint32_t events, void *userdata);
 
 /* Timer callback */
 typedef void (*portal_timer_fn)(void *userdata);
+
+/* Module iteration callback (observability) */
+typedef void (*portal_module_iter_fn)(const char *name, const char *version,
+                                       int loaded, uint64_t msg_count,
+                                       uint64_t last_msg_us, void *userdata);
+
+/* Path iteration callback (observability) */
+typedef void (*portal_path_iter_fn)(const char *path, const char *module_name,
+                                     void *userdata);
 
 /* The core API — every module receives a pointer to this */
 struct portal_core {
@@ -64,6 +56,10 @@ struct portal_core {
 
     /* Module queries */
     int  (*module_loaded)(portal_core_t *core, const char *name);
+
+    /* Observability iterators (read-only enumeration of internal state) */
+    int  (*module_iter)(portal_core_t *core, portal_module_iter_fn cb, void *ud);
+    int  (*path_iter)(portal_core_t *core, portal_path_iter_fn cb, void *ud);
 
     /* Event loop fd management — modules register fds they want polled */
     int  (*fd_add)(portal_core_t *core, int fd, uint32_t events,

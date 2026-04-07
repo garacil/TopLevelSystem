@@ -1,21 +1,4 @@
 /*
- * Author: Germán Luis Aracil Boned <garacilb@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
  * module.h — Module interface definition
  *
  * Defines the 4 symbols every .so module must export:
@@ -25,6 +8,7 @@
 #ifndef PORTAL_MODULE_H
 #define PORTAL_MODULE_H
 
+#include <stdint.h>
 #include "core.h"
 
 /* Module descriptor — returned by portal_module_info() */
@@ -65,6 +49,9 @@ typedef struct {
     int                        loaded;      /* 1 = active */
     volatile int               use_count;   /* active calls — must be 0 to unload */
     int                        unloading;   /* 1 = pending unload, reject new calls */
+    /* Observability counters (incremented in core dispatch) */
+    uint64_t                   msg_count;   /* total messages handled */
+    uint64_t                   last_msg_us; /* monotonic timestamp of last call */
 } portal_module_entry_t;
 
 #endif /* PORTAL_MODULE_H */

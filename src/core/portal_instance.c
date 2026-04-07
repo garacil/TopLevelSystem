@@ -1,21 +1,4 @@
 /*
- * Author: Germán Luis Aracil Boned <garacilb@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
  * portal_instance.c — Portal core instance wiring
  *
  * Connects all subsystems: paths, modules, auth, events, storage.
@@ -202,6 +185,9 @@ static int api_send(portal_core_t *core, portal_msg_t *msg, portal_resp_t *resp)
 
     /* Reference count: protect against unload during handle */
     entry->use_count++;
+    /* Observability counters (Law 13: O(1) increment, no locks — single thread) */
+    entry->msg_count++;
+    entry->last_msg_us = portal_time_us();
 
     LOG_TRACE("router", "[%lu] %s → %s (t:%lu h:%d)",
               msg->id, msg->path, mod_name,
@@ -662,6 +648,45 @@ static int api_timer_add(portal_core_t *core, double interval,
     return portal_event_add_timer(&inst->events, interval, callback, userdata);
 }
 
+/* --- Observability iterators --- */
+
+static int api_module_iter(portal_core_t *core, portal_module_iter_fn cb, void *ud)
+{
+    portal_instance_t *inst = core->_internal;
+    if (!cb) return -1;
+    int n = 0;
+    for (int i = 0; i < inst->modules.count; i++) {
+        portal_module_entry_t *e = &inst->modules.entries[i];
+        const char *name = e->info ? e->info->name : e->name;
+        const char *ver  = e->info ? e->info->version : "";
+        cb(name, ver, e->loaded, e->msg_count, e->last_msg_us, ud);
+        n++;
+    }
+    return n;
+}
+
+typedef struct {
+    portal_path_iter_fn cb;
+    void *ud;
+    int  count;
+} path_iter_ctx_t;
+
+static void path_iter_cb(const char *path, const char *module_name, void *userdata)
+{
+    path_iter_ctx_t *c = userdata;
+    c->cb(path, module_name, c->ud);
+    c->count++;
+}
+
+static int api_path_iter(portal_core_t *core, portal_path_iter_fn cb, void *ud)
+{
+    portal_instance_t *inst = core->_internal;
+    if (!cb) return -1;
+    path_iter_ctx_t c = { cb, ud, 0 };
+    portal_path_list(&inst->paths, path_iter_cb, &c);
+    return c.count;
+}
+
 /* --- Instance lifecycle --- */
 
 void portal_instance_setup_api(portal_instance_t *inst)
@@ -679,6 +704,8 @@ void portal_instance_setup_api(portal_instance_t *inst)
     inst->api.event_emit        = api_event_emit;
     inst->api.storage_register  = api_storage_register;
     inst->api.module_loaded     = api_module_loaded;
+    inst->api.module_iter       = api_module_iter;
+    inst->api.path_iter         = api_path_iter;
     inst->api.fd_add            = api_fd_add;
     inst->api.fd_del            = api_fd_del;
     inst->api.config_get        = api_config_get;

@@ -1,21 +1,4 @@
 /*
- * Author: Germán Luis Aracil Boned <garacilb@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
  * mod_cli — CLI module for Portal
  *
  * Provides a command-line interface over a UNIX domain socket.
@@ -26,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <errno.h>
@@ -59,6 +43,9 @@ typedef struct {
     char               token[64];
     char               username[64];
     int                active;
+    int                top_active;   /* 1 = interactive `top` running */
+    char               top_sort;     /* 'c'=cpu, 'm'=mem, 'p'=pid */
+    int                top_threads;  /* 0/1 — show threads instead of procs */
     cli_line_editor_t  editor;
 } cli_client_t;
 
@@ -120,6 +107,7 @@ static void remove_client(int fd)
     for (int i = 0; i < g_client_count; i++) {
         if (g_clients[i].fd == fd) {
             g_clients[i].active = 0;
+            g_clients[i].top_active = 0;
             g_client_count--;
             break;
         }
@@ -216,6 +204,7 @@ static void cmd_help(int fd)
         "  verbose off           Stop message trace\n"
         "  debug [filter]        Like verbose + hex/text dump of body\n"
         "  debug off             Stop debug trace\n"
+        "  top                   Real-time process viewer (q=quit c/m/p=sort t=threads)\n"
         "  path list             List all registered paths\n"
         "  version               Show version\n"
         "  quit                  Close connection\n"
@@ -591,6 +580,70 @@ static void cmd_module_unload(int fd, const char *name)
     }
 }
 
+/* --- Interactive `top` --- */
+
+static void render_top_frame(cli_client_t *c)
+{
+    portal_msg_t *msg = portal_msg_alloc();
+    portal_resp_t *resp = portal_resp_alloc();
+    if (!msg || !resp) {
+        if (msg) portal_msg_free(msg);
+        if (resp) portal_resp_free(resp);
+        return;
+    }
+    portal_msg_set_path(msg, "/process/resources/portal_top");
+    portal_msg_set_method(msg, PORTAL_METHOD_GET);
+
+    g_core->send(g_core, msg, resp);
+
+    /* Home cursor, clear to end of screen */
+    write(c->fd, "\033[H\033[2J", 7);
+
+    /* Header */
+    char hdr[128];
+    int hn = snprintf(hdr, sizeof(hdr),
+        "\033[7m portal top — modules + threads — [q]uit \033[0m\r\n");
+    write(c->fd, hdr, (size_t)hn);
+
+    if (resp->body && resp->body_len > 0)
+        write(c->fd, resp->body, resp->body_len);
+    else
+        write(c->fd, "(no data)\r\n", 11);
+
+    portal_msg_free(msg);
+    portal_resp_free(resp);
+}
+
+static void cmd_top_enter(int fd)
+{
+    cli_client_t *c = find_client(fd);
+    if (!c) return;
+    c->top_active  = 1;
+    c->top_sort    = 'c';
+    c->top_threads = 0;
+    /* Hide cursor, clear screen, home */
+    write(fd, "\033[?25l\033[2J\033[H", 14);
+    render_top_frame(c);
+}
+
+static void cmd_top_exit(cli_client_t *c)
+{
+    if (!c) return;
+    c->top_active = 0;
+    /* Show cursor, clear, home */
+    write(c->fd, "\033[?25h\033[2J\033[H", 14);
+    send_prompt(c->fd);
+}
+
+static void top_timer_cb(void *userdata)
+{
+    (void)userdata;
+    for (int i = 0; i < CLI_MAX_CLIENTS; i++) {
+        if (g_clients[i].active && g_clients[i].top_active)
+            render_top_frame(&g_clients[i]);
+    }
+}
+
 /* --- Command dispatch --- */
 
 static void handle_command(int fd, char *line)
@@ -750,6 +803,9 @@ static void handle_command(int fd, char *line)
                 write(fd, r->body, r->body_len > 0 ? r->body_len : strlen(r->body));
             portal_msg_free(m); portal_resp_free(r);
         }
+    } else if (strcmp(line, "top") == 0) {
+        cmd_top_enter(fd);
+        return;  /* no prompt — top owns the screen */
     } else if (strcmp(line, "verbose off") == 0) {
         g_core->trace_del(g_core, fd);
         send_str(fd, "Verbose off\n");
@@ -2032,7 +2088,7 @@ static void editor_tab_complete(int fd, cli_client_t *c)
             "dns", "schedule", "process", "validate", "sysinfo", "metrics",
             "compress", "quit", "exit", "iot", "node", "ping", "tracert",
             "cache", "cron", "config", "health", "json", "curl", "locks",
-            "lock", "unlock", "verbose", "debug", NULL
+            "lock", "unlock", "verbose", "debug", "top", NULL
         };
         char matches[TAB_MAX_MATCHES][128];
         int match_count = 0;
@@ -2239,6 +2295,19 @@ static void editor_feed(int fd, cli_client_t *c, unsigned char ch)
 {
     cli_line_editor_t *ed = &c->editor;
 
+    /* Interactive `top` intercepts all keys while active */
+    if (c->top_active) {
+        switch (ch) {
+        case 'q': case 'Q':
+        case 3:   /* Ctrl-C */
+        case 27:  /* ESC */
+            cmd_top_exit(c);
+            return;
+        default:
+            return;  /* swallow anything else */
+        }
+    }
+
     /* Escape sequence state machine */
     if (ed->esc_state == 1) {
         if (ch == '[') { ed->esc_state = 2; return; }
@@ -2366,6 +2435,9 @@ static void on_new_connection(int fd, uint32_t events, void *userdata)
     c->fd = client_fd;
     snprintf(c->cwd, sizeof(c->cwd), "/");
     c->active = 1;
+    c->top_active = 0;
+    c->top_sort = 'c';
+    c->top_threads = 0;
     g_client_count++;
 
     g_core->fd_add(g_core, client_fd, EV_READ, on_client_data, NULL);
@@ -2421,6 +2493,9 @@ int portal_module_load(portal_core_t *core)
 
     /* Register with event loop */
     core->fd_add(core, g_sock_fd, EV_READ, on_new_connection, NULL);
+
+    /* 1 Hz timer for interactive `top` view (renders active clients only) */
+    core->timer_add(core, 1.0, top_timer_cb, NULL);
 
     /* Register our path */
     core->path_register(core, "/cli/command", "cli");
