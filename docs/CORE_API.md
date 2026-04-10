@@ -649,6 +649,18 @@ This means:
 | `PORTAL_MAX_LABELS` | 32 | Maximum labels per set |
 | `PORTAL_MAX_LABEL_LEN` | 64 | Maximum label string length |
 
+### Federation Limits (mod_node)
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `NODE_MAX_PEERS` | 2048 | Maximum concurrent federation peers |
+| `NODE_MAX_FDS` | 8192 | Maximum fd→SSL lookup table size |
+| `NODE_MAX_THREADS` | 16 | Maximum worker connections per peer |
+| `NODE_PEER_MAX_PATHS` | 32 | Maximum path registrations per remote peer |
+| `NODE_PEER_PATH_LEN` | 256 | Maximum path string length per peer |
+
+Memory per peer: ~10 KB (with paths[32][256]). At 2048 peers: ~20 MB.
+
 ### Special Values
 
 | Constant | Value | Description |
