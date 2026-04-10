@@ -1,20 +1,3 @@
-<!--
-  Author: Germán Luis Aracil Boned <garacilb@gmail.com>
-
-  This program is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 2 of the License, or
-  (at your option) any later version.
-
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program; if not, see <https://www.gnu.org/licenses/>.
--->
-
 # Module Development Guide
 
 Step-by-step guide to creating a Portal module. For the complete API reference, see [CORE_API.md](CORE_API.md).
@@ -382,3 +365,46 @@ Before releasing a module:
 **Documentation:**
 - [ ] Header comment on source file describing purpose
 - [ ] All paths follow convention: `/<module>/resources/` and `/<module>/functions/`
+
+---
+
+## Remote Shell via Federation
+
+Any Portal instance with `mod_shell` loaded provides remote shell access to federated peers:
+
+```
+portal:/> shell <peer_name>
+Connected to <peer_name> (Ctrl-] to disconnect)
+root@remote:~# 
+```
+
+This works bidirectionally. A device can shell into the hub, and the hub can shell into any device. Uses real PTY (`forkpty()`) — htop, vi, and all interactive programs work.
+
+Configuration (`mod_shell.conf`):
+```ini
+enabled = true
+[mod_shell]
+timeout = 10         # Max seconds per stateless command
+shell = /bin/bash    # Shell binary
+allow_exec = true    # Safety switch
+max_output = 65536   # Max bytes per read
+session_ttl = 3600   # Auto-close inactive sessions after 1 hour
+```
+
+### CLI Help System
+
+Every registered path can have a description:
+
+```c
+core->path_register(core, "/mymod/functions/action", "mymod");
+core->path_set_access(core, "/mymod/functions/action", PORTAL_ACCESS_RW);
+core->path_set_description(core, "/mymod/functions/action",
+    "Does something useful. Header: param_name (required)");
+```
+
+Users discover it with:
+```
+portal:/> help /mymod/functions/action
+portal:/> help mymod
+portal:/> help get
+```

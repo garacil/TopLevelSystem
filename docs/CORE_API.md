@@ -723,3 +723,43 @@ portal> module list
 8. **Paths start with `/module_name/`.** Convention for namespace isolation.
 9. **Use labels for access control.** Restrict sensitive paths with `path_add_label()`.
 10. **Body format is your choice.** Text, JSON, binary, protobuf — whatever fits. Document it.
+
+---
+
+## 13. Remote Shell (mod_shell)
+
+Portal includes a built-in remote shell module that provides SSH-like interactive terminal access to any federated peer.
+
+### Stateless Execution
+
+```
+GET /shell/functions/exec?cmd=uptime
+```
+
+Executes a single command via `popen()`. Returns stdout+stderr as body.
+
+### Interactive PTY Sessions
+
+```
+PUT /shell/functions/open?rows=24&cols=80  → session_id
+PUT /shell/functions/write?session=<id>    (body: raw bytes)
+PUT /shell/functions/read?session=<id>     → available output
+PUT /shell/functions/close?session=<id>    → closed
+PUT /shell/functions/resize?session=<id>&rows=40&cols=120
+```
+
+PTY sessions use `forkpty()` with `TERM=xterm-256color`. Interactive programs (htop, vi, top, less, sudo) work correctly.
+
+### CLI Shell Mode
+
+```
+portal:/> shell <peer>
+Connected to <peer> (Ctrl-] to disconnect)
+root@remote:~# htop
+```
+
+Every keystroke goes raw to the remote PTY. Output streams back at 10Hz (100ms). Ctrl-] disconnects. Works bidirectionally between any federated peers.
+
+### Security
+
+All shell paths require label `admin`. Every execution emits `/events/shell/exec` for audit.
