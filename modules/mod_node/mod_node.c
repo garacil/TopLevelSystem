@@ -77,14 +77,16 @@ extern int     portal_wire_encode_resp(const portal_resp_t *resp, uint8_t **buf,
 extern int     portal_wire_decode_resp(const uint8_t *buf, size_t len, portal_resp_t *resp);
 extern int32_t portal_wire_read_length(const uint8_t *buf);
 
-#define NODE_MAX_PEERS        32
+#define NODE_MAX_PEERS        2048
 #define NODE_MAX_THREADS      16
 #define NODE_BUF_SIZE         65536
 #define NODE_DEFAULT_PORT     9700
 #define NODE_DEFAULT_THREADS  4
 #define NODE_HANDSHAKE_MAGIC  "PORTAL02"
 #define NODE_RECONNECT_SEC    10
-#define NODE_MAX_FDS          512
+#define NODE_MAX_FDS          8192
+#define NODE_PEER_MAX_PATHS   32      /* paths registered per remote peer (was 256) */
+#define NODE_PEER_PATH_LEN    256     /* max path length per peer (was 1024) */
 #define NODE_KEY_HASH_LEN     32   /* SHA-256 hash of federation key */
 
 /* --- Federation key (authentication) --- */
@@ -146,7 +148,7 @@ typedef struct {
     int            worker_count;
     int            next_worker;  /* round-robin index */
     pthread_mutex_t lock;
-    char           paths[256][PORTAL_MAX_PATH_LEN];
+    char           paths[NODE_PEER_MAX_PATHS][NODE_PEER_PATH_LEN];
     int            path_count;
     /* Traffic counters */
     uint64_t       msgs_sent;
@@ -582,7 +584,8 @@ static void register_indirect_peer(const char *name, int hub_idx)
     snprintf(path, sizeof(path), "/%s/*", name);
     if (g_core->path_register(g_core, path, "node") == 0) {
         g_core->path_set_access(g_core, path, PORTAL_ACCESS_RW);
-        snprintf(peer->paths[0], PORTAL_MAX_PATH_LEN, "%s", path);
+        snprintf(peer->paths[0], NODE_PEER_PATH_LEN, "%.*s",
+                (int)(NODE_PEER_PATH_LEN - 1), path);
         peer->path_count = 1;
         g_core->log(g_core, PORTAL_LOG_INFO, "node",
                     "Indirect peer '%s' via hub '%s'",
@@ -1102,7 +1105,8 @@ static void on_new_peer(int fd, uint32_t events, void *userdata)
                     "FAILED to register path '%s' for peer '%s' (rc=%d)",
                     path, peer->name, preg);
     }
-    snprintf(peer->paths[0], PORTAL_MAX_PATH_LEN, "%s", path);
+    snprintf(peer->paths[0], NODE_PEER_PATH_LEN, "%.*s",
+                (int)(NODE_PEER_PATH_LEN - 1), path);
     peer->path_count = 1;
 
     g_core->fd_add(g_core, client_fd, EV_READ, on_inbound_data, NULL);
@@ -1191,7 +1195,8 @@ static int connect_to_peer(const char *name, const char *host, int port)
     snprintf(path, sizeof(path), "/%s/*", peer->name);
     g_core->path_register(g_core, path, "node");
     g_core->path_set_access(g_core, path, PORTAL_ACCESS_RW);
-    snprintf(peer->paths[0], PORTAL_MAX_PATH_LEN, "%s", path);
+    snprintf(peer->paths[0], NODE_PEER_PATH_LEN, "%.*s",
+                (int)(NODE_PEER_PATH_LEN - 1), path);
     peer->path_count = 1;
 
     g_core->fd_add(g_core, fd, EV_READ, on_inbound_data, NULL);
