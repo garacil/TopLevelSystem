@@ -46,6 +46,10 @@ typedef struct {
     int                top_active;   /* 1 = interactive `top` running */
     char               top_sort;     /* 'c'=cpu, 'm'=mem, 'p'=pid */
     int                top_threads;  /* 0/1 — show threads instead of procs */
+    /* Shell mode */
+    int                shell_active; /* 1 = interactive remote shell running */
+    char               shell_peer[64]; /* federation peer name (empty = local) */
+    char               shell_cwd[256]; /* virtual cwd for stateful-feel shell */
     cli_line_editor_t  editor;
 } cli_client_t;
 
@@ -90,7 +94,13 @@ static cli_client_t *find_client(int fd)
 static void send_prompt(int fd)
 {
     cli_client_t *c = find_client(fd);
-    if (c && strcmp(c->cwd, "/") != 0) {
+    if (c && c->shell_active) {
+        char buf[384];
+        const char *host = c->shell_peer[0] ? c->shell_peer : "local";
+        const char *cwd = c->shell_cwd[0] ? c->shell_cwd : "~";
+        snprintf(buf, sizeof(buf), "root@%s:%s# ", host, cwd);
+        send_str(fd, buf);
+    } else if (c && strcmp(c->cwd, "/") != 0) {
         char buf[PORTAL_MAX_PATH_LEN + 16];
         snprintf(buf, sizeof(buf), "portal:%s> ", c->cwd);
         send_str(fd, buf);
@@ -152,7 +162,7 @@ static void cmd_help_module(int fd, const char *module)
     g_core->path_iter(g_core, help_module_path_cb, &ctx);
 
     if (ctx.res_count == 0 && ctx.fn_count == 0) {
-        char buf[128];
+        char buf[384];
         snprintf(buf, sizeof(buf),
                  "Module '%s' not found or has no registered paths.\n"
                  "Type 'module list' to see loaded modules.\n", module);
@@ -365,7 +375,7 @@ static void cmd_status(int fd)
 
 static void cmd_version(int fd)
 {
-    char buf[128];
+    char buf[384];
     snprintf(buf, sizeof(buf), "Portal v%s\n", PORTAL_VERSION_STR);
     send_str(fd, buf);
 }
@@ -522,7 +532,7 @@ static void cmd_login(int fd, const char *args)
         if (tlen > 0 && token[tlen-1] == '\n') token[tlen-1] = '\0';
         snprintf(c->token, sizeof(c->token), "%s", token);
         snprintf(c->username, sizeof(c->username), "%s", user);
-        char buf[128];
+        char buf[384];
         snprintf(buf, sizeof(buf), "Logged in as %s\n", user);
         send_str(fd, buf);
     } else {
@@ -596,11 +606,11 @@ static void cmd_module_load(int fd, const char *name)
         portal_msg_add_header(msg, "action", "load");
         int rc = g_core->send(g_core, msg, resp);
         if (rc == 0 && resp->status == PORTAL_OK) {
-            char buf[128];
+            char buf[384];
             snprintf(buf, sizeof(buf), "Module '%s' loaded\n", name);
             send_str(fd, buf);
         } else {
-            char buf[128];
+            char buf[384];
             snprintf(buf, sizeof(buf), "Failed to load module '%s'\n", name);
             send_str(fd, buf);
         }
@@ -625,11 +635,11 @@ static void cmd_module_unload(int fd, const char *name)
         portal_msg_add_header(msg, "action", "unload");
         int rc = g_core->send(g_core, msg, resp);
         if (rc == 0 && resp->status == PORTAL_OK) {
-            char buf[128];
+            char buf[384];
             snprintf(buf, sizeof(buf), "Module '%s' unloaded\n", name);
             send_str(fd, buf);
         } else {
-            char buf[128];
+            char buf[384];
             snprintf(buf, sizeof(buf), "Failed to unload module '%s'\n", name);
             send_str(fd, buf);
         }
@@ -716,6 +726,71 @@ static void handle_command(int fd, char *line)
         return;
     }
 
+    /* ── Shell mode: intercept all input ── */
+    cli_client_t *sh = find_client(fd);
+    if (sh && sh->shell_active) {
+        if (strcmp(line, "exit") == 0) {
+            sh->shell_active = 0;
+            sh->shell_peer[0] = '\0';
+            send_str(fd, "Disconnected\n");
+            send_prompt(fd);
+            return;
+        }
+
+        /* Track virtual cwd for `cd` commands */
+        if (strncmp(line, "cd ", 3) == 0 || strcmp(line, "cd") == 0) {
+            const char *dir = strlen(line) > 3 ? line + 3 : "/";
+            if (dir[0] == '/')
+                snprintf(sh->shell_cwd, sizeof(sh->shell_cwd), "%s", dir);
+            else
+                snprintf(sh->shell_cwd, sizeof(sh->shell_cwd), "%.120s/%.120s",
+                         strcmp(sh->shell_cwd, "/") == 0 ? "" : sh->shell_cwd, dir);
+        }
+
+        /* Build the path for shell exec */
+        char spath[256];
+        if (sh->shell_peer[0])
+            snprintf(spath, sizeof(spath), "/%s/shell/functions/exec", sh->shell_peer);
+        else
+            snprintf(spath, sizeof(spath), "/shell/functions/exec");
+
+        portal_msg_t *sm = portal_msg_alloc();
+        portal_resp_t *sr = portal_resp_alloc();
+        if (sm && sr) {
+            portal_msg_set_path(sm, spath);
+            portal_msg_set_method(sm, PORTAL_METHOD_CALL);
+            portal_msg_add_header(sm, "cmd", line);
+            if (sh->shell_cwd[0] && strcmp(sh->shell_cwd, "/") != 0)
+                portal_msg_add_header(sm, "cwd", sh->shell_cwd);
+
+            /* Set auth context from the CLI session */
+            if (sh->token[0]) {
+                portal_ctx_t *ctx = calloc(1, sizeof(portal_ctx_t));
+                if (ctx) {
+                    ctx->auth.user = strdup(sh->username);
+                    ctx->auth.token = strdup(sh->token);
+                    sm->ctx = ctx;
+                }
+            }
+
+            g_core->send(g_core, sm, sr);
+            if (sr->body && sr->body_len > 0)
+                write(fd, sr->body, sr->body_len);
+            portal_msg_free(sm);
+            portal_resp_free(sr);
+        }
+
+        /* Shell prompt */
+        {
+            char sprompt[384];
+            const char *host = sh->shell_peer[0] ? sh->shell_peer : "local";
+            const char *cwd = sh->shell_cwd[0] ? sh->shell_cwd : "~";
+            snprintf(sprompt, sizeof(sprompt), "root@%.60s:%.120s# ", host, cwd);
+            send_str(fd, sprompt);
+        }
+        return;
+    }
+
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
         cmd_help(fd);
     } else if (strncmp(line, "help ", 5) == 0) {
@@ -762,7 +837,7 @@ static void handle_command(int fd, char *line)
             portal_msg_set_method(msg, PORTAL_METHOD_CALL);
             portal_msg_add_header(msg, "action", "reload");
             int rc = g_core->send(g_core, msg, resp);
-            char buf[128];
+            char buf[384];
             snprintf(buf, sizeof(buf), rc == 0 ? "Module '%s' reloaded\n" : "Failed to reload '%s'\n", name);
             send_str(fd, buf);
             portal_msg_free(msg);
@@ -1788,6 +1863,25 @@ static void handle_command(int fd, char *line)
             else
                 send_str(fd, "(refresh failed)\n");
             portal_msg_free(m); portal_resp_free(r);
+        }
+    } else if (strcmp(line, "shell") == 0 || strncmp(line, "shell ", 6) == 0) {
+        /* Enter shell mode: "shell" = local, "shell <peer>" = remote */
+        cli_client_t *sc = find_client(fd);
+        if (sc) {
+            if (strlen(line) > 6)
+                snprintf(sc->shell_peer, sizeof(sc->shell_peer), "%s", line + 6);
+            else
+                sc->shell_peer[0] = '\0'; /* local */
+            sc->shell_active = 1;
+            snprintf(sc->shell_cwd, sizeof(sc->shell_cwd), "/");
+            char banner[128];
+            if (sc->shell_peer[0])
+                snprintf(banner, sizeof(banner),
+                         "Connected to %s (type 'exit' to return)\n", sc->shell_peer);
+            else
+                snprintf(banner, sizeof(banner),
+                         "Local shell (type 'exit' to return)\n");
+            send_str(fd, banner);
         }
     } else if (strcmp(line, "quit") == 0 || strcmp(line, "exit") == 0) {
         send_str(fd, "Goodbye.\n");

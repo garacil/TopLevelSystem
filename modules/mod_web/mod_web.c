@@ -1,21 +1,4 @@
 /*
- * Author: Germán Luis Aracil Boned <garacilb@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
  * mod_web — HTTP REST API Module for Portal
  *
  * Exposes all Portal paths as HTTP endpoints.
@@ -358,7 +341,8 @@ static void handle_http_request(int fd, http_request_t *req)
     if (req->body_len > 0)
         portal_msg_set_body(msg, req->body, (size_t)req->body_len);
 
-    /* Parse query string as headers: key=value&key2=value2 */
+    /* Parse query string as headers: key=value&key2=value2
+     * URL-decodes both keys and values (%XX → byte, + → space) */
     if (req->query[0]) {
         char qbuf[1024];
         snprintf(qbuf, sizeof(qbuf), "%s", req->query);
@@ -368,7 +352,30 @@ static void handle_http_request(int fd, http_request_t *req)
             char *eq = strchr(pair, '=');
             if (eq) {
                 *eq = '\0';
-                portal_msg_add_header(msg, pair, eq + 1);
+                /* URL-decode key and value in-place */
+                char *src, *dst;
+                /* Decode key */
+                for (src = dst = pair; *src; src++, dst++) {
+                    if (*src == '+') *dst = ' ';
+                    else if (*src == '%' && src[1] && src[2]) {
+                        unsigned int ch;
+                        if (sscanf(src + 1, "%2x", &ch) == 1) { *dst = (char)ch; src += 2; }
+                        else *dst = *src;
+                    } else *dst = *src;
+                }
+                *dst = '\0';
+                /* Decode value */
+                char *val = eq + 1;
+                for (src = dst = val; *src; src++, dst++) {
+                    if (*src == '+') *dst = ' ';
+                    else if (*src == '%' && src[1] && src[2]) {
+                        unsigned int ch;
+                        if (sscanf(src + 1, "%2x", &ch) == 1) { *dst = (char)ch; src += 2; }
+                        else *dst = *src;
+                    } else *dst = *src;
+                }
+                *dst = '\0';
+                portal_msg_add_header(msg, pair, val);
             }
             pair = strtok_r(NULL, "&", &saveptr);
         }

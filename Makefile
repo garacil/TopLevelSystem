@@ -1,20 +1,3 @@
-#
-# Author: Germán Luis Aracil Boned <garacilb@gmail.com>
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, see <https://www.gnu.org/licenses/>.
-#
-
 # Portal — Universal Modular Core
 # Makefile
 #
@@ -95,6 +78,7 @@ MOD_PSQL     = $(MOD_DIR)/mod_config_psql.so
 MOD_SQLITE   = $(MOD_DIR)/mod_config_sqlite.so
 MOD_WEB      = $(MOD_DIR)/mod_web.so
 MOD_HELLO    = $(MOD_DIR)/mod_hello.so
+MOD_SHELL    = $(MOD_DIR)/mod_shell.so
 MOD_MYAPP    = $(MOD_DIR)/mod_myapp.so
 MOD_CACHE    = $(MOD_DIR)/mod_cache.so
 MOD_HEALTH   = $(MOD_DIR)/mod_health.so
@@ -172,7 +156,7 @@ $(BUILD_DIR)/%.o: %.c
 # --- Modules ---
 
 # Build module list based on detected libraries
-MOD_ALL = $(MOD_CLI) $(MOD_NODE) $(MOD_HELLO) $(MOD_MYAPP) $(MOD_CACHE) \
+MOD_ALL = $(MOD_CLI) $(MOD_NODE) $(MOD_HELLO) $(MOD_SHELL) $(MOD_MYAPP) $(MOD_CACHE) \
           $(MOD_HEALTH) $(MOD_CRON) $(MOD_JSON) $(MOD_SHM) $(MOD_QUEUE) \
           $(MOD_WS) $(MOD_MQTT) $(MOD_EMAIL) $(MOD_LOGIC) $(MOD_LOGIC_C) \
           $(MOD_PASCAL) $(MOD_WORKER) $(MOD_SERIAL) $(MOD_FILE) $(MOD_METRICS) \
@@ -234,6 +218,10 @@ $(MOD_WEB): $(MOD_DIR)/mod_web/mod_web.c $(CORE_DIR)/core_message.c
 	@$(CC) $(CFLAGS) -shared -fPIC -o $@ $^ $(SSL_LIBS)
 
 $(MOD_HELLO): $(MOD_DIR)/mod_hello/mod_hello.c $(CORE_DIR)/core_message.c
+	@echo "  SO    $@"
+	@$(CC) $(CFLAGS) -shared -fPIC -o $@ $^
+
+$(MOD_SHELL): $(MOD_DIR)/mod_shell/mod_shell.c $(CORE_DIR)/core_message.c
 	@echo "  SO    $@"
 	@$(CC) $(CFLAGS) -shared -fPIC -o $@ $^
 
