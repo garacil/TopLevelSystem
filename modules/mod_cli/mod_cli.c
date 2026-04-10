@@ -120,6 +120,20 @@ static void remove_client(int fd)
     }
 }
 
+/* ── Attach CLI user's auth context to a portal message ── */
+static void cli_attach_auth(int fd, portal_msg_t *msg)
+{
+    cli_client_t *c = find_client(fd);
+    if (c && c->token[0]) {
+        portal_ctx_t *ctx = calloc(1, sizeof(portal_ctx_t));
+        if (ctx) {
+            ctx->auth.user = strdup(c->username);
+            ctx->auth.token = strdup(c->token);
+            msg->ctx = ctx;
+        }
+    }
+}
+
 /* --- Command handlers --- */
 
 /* ── help for built-in commands ── */
@@ -875,6 +889,7 @@ static void handle_command(int fd, char *line)
                 portal_msg_set_path(cm, spath);
                 portal_msg_set_method(cm, PORTAL_METHOD_CALL);
                 portal_msg_add_header(cm, "session", sh->shell_session);
+                cli_attach_auth(fd, cm);
                 g_core->send(g_core, cm, cr);
                 portal_msg_free(cm); portal_resp_free(cr);
             }
@@ -904,6 +919,7 @@ static void handle_command(int fd, char *line)
             portal_msg_set_method(wm, PORTAL_METHOD_CALL);
             portal_msg_add_header(wm, "session", sh->shell_session);
             portal_msg_set_body(wm, input, (size_t)ilen);
+            cli_attach_auth(fd, wm);
             g_core->send(g_core, wm, wr);
             portal_msg_free(wm); portal_resp_free(wr);
         }
@@ -920,6 +936,7 @@ static void handle_command(int fd, char *line)
             portal_msg_set_path(rm, spath);
             portal_msg_set_method(rm, PORTAL_METHOD_CALL);
             portal_msg_add_header(rm, "session", sh->shell_session);
+            cli_attach_auth(fd, rm);
             g_core->send(g_core, rm, rr);
             if (rr->body && rr->body_len > 0)
                 write(fd, rr->body, rr->body_len);
@@ -2036,6 +2053,7 @@ static void handle_command(int fd, char *line)
                 portal_msg_set_method(om, PORTAL_METHOD_CALL);
                 portal_msg_add_header(om, "rows", "24");
                 portal_msg_add_header(om, "cols", "80");
+                cli_attach_auth(fd, om);
                 g_core->send(g_core, om, or_resp);
 
                 if (or_resp->status == PORTAL_OK && or_resp->body && or_resp->body_len > 0) {
@@ -2067,6 +2085,7 @@ static void handle_command(int fd, char *line)
                         portal_msg_set_path(rm, rpath);
                         portal_msg_set_method(rm, PORTAL_METHOD_CALL);
                         portal_msg_add_header(rm, "session", sc->shell_session);
+                        cli_attach_auth(fd, rm);
                         g_core->send(g_core, rm, rr);
                         if (rr->body && rr->body_len > 0)
                             write(fd, rr->body, rr->body_len);
