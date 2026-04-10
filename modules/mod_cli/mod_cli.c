@@ -47,10 +47,14 @@ typedef struct {
     int                top_active;   /* 1 = interactive `top` running */
     char               top_sort;     /* 'c'=cpu, 'm'=mem, 'p'=pid */
     int                top_threads;  /* 0/1 — show threads instead of procs */
+    int                top_scroll;   /* scroll offset for module list */
     /* Shell mode (PTY session) */
     int                shell_active;    /* 1 = PTY shell running */
     char               shell_peer[64];  /* federation peer (empty = local) */
     char               shell_session[32]; /* PTY session_id from mod_shell */
+    /* Terminal size (sent by portalctl at connect time) */
+    int                term_rows;       /* 0 = unknown, use default 24 */
+    int                term_cols;       /* 0 = unknown, use default 80 */
     cli_line_editor_t  editor;
 } cli_client_t;
 
@@ -811,19 +815,72 @@ static void render_top_frame(cli_client_t *c)
 
     g_core->send(g_core, msg, resp);
 
-    /* Home cursor, clear to end of screen */
+    int rows = c->term_rows > 0 ? c->term_rows : 24;
+    int cols = c->term_cols > 0 ? c->term_cols : 80;
+
+    /* Home cursor, clear screen */
     write(c->fd, "\033[H\033[2J", 7);
 
-    /* Header */
-    char hdr[128];
+    /* Fixed header bar (row 1) */
+    char hdr[256];
     int hn = snprintf(hdr, sizeof(hdr),
-        "\033[7m portal top — modules + threads — [q]uit \033[0m\r\n");
+        "\033[7m portal top — modules + threads — [q]uit  [↑↓]scroll \033[0m\r\n");
     write(c->fd, hdr, (size_t)hn);
 
-    if (resp->body && resp->body_len > 0)
-        write(c->fd, resp->body, resp->body_len);
-    else
+    if (!resp->body || resp->body_len == 0) {
         write(c->fd, "(no data)\r\n", 11);
+        portal_msg_free(msg); portal_resp_free(resp);
+        return;
+    }
+
+    /* Split body into lines, render only what fits with scroll offset */
+    const char *body = resp->body;
+    size_t blen = resp->body_len;
+
+    /* Count lines */
+    int total_lines = 0;
+    for (size_t i = 0; i < blen; i++)
+        if (body[i] == '\n') total_lines++;
+
+    /* Clamp scroll */
+    int visible = rows - 2;  /* header + status bar */
+    if (visible < 1) visible = 1;
+    int max_scroll = total_lines - visible;
+    if (max_scroll < 0) max_scroll = 0;
+    if (c->top_scroll > max_scroll) c->top_scroll = max_scroll;
+    if (c->top_scroll < 0) c->top_scroll = 0;
+
+    /* Find start of line at scroll offset */
+    int line = 0;
+    size_t pos = 0;
+    while (pos < blen && line < c->top_scroll) {
+        if (body[pos] == '\n') line++;
+        pos++;
+    }
+
+    /* Render visible lines */
+    int rendered = 0;
+    while (pos < blen && rendered < visible) {
+        /* Find end of line */
+        size_t eol = pos;
+        while (eol < blen && body[eol] != '\n') eol++;
+
+        /* Truncate to terminal width */
+        size_t line_len = eol - pos;
+        if ((int)line_len > cols) line_len = (size_t)cols;
+
+        write(c->fd, body + pos, line_len);
+        write(c->fd, "\r\n", 2);
+        rendered++;
+        pos = eol + 1;
+    }
+
+    /* Status bar at bottom */
+    char status[128];
+    int sn = snprintf(status, sizeof(status),
+        "\033[%d;1H\033[7m [%d/%d lines] scroll=%d \033[0m",
+        rows, total_lines, visible, c->top_scroll);
+    write(c->fd, status, (size_t)sn);
 
     portal_msg_free(msg);
     portal_resp_free(resp);
@@ -836,8 +893,9 @@ static void cmd_top_enter(int fd)
     c->top_active  = 1;
     c->top_sort    = 'c';
     c->top_threads = 0;
-    /* Hide cursor, clear screen, home */
-    write(fd, "\033[?25l\033[2J\033[H", 14);
+    c->top_scroll  = 0;
+    /* Enter alternate screen, hide cursor */
+    write(fd, "\033[?1049h\033[?25l", 14);
     render_top_frame(c);
 }
 
@@ -845,8 +903,8 @@ static void cmd_top_exit(cli_client_t *c)
 {
     if (!c) return;
     c->top_active = 0;
-    /* Show cursor, clear, home */
-    write(c->fd, "\033[?25h\033[2J\033[H", 14);
+    /* Show cursor, exit alternate screen */
+    write(c->fd, "\033[?25h\033[?1049l", 14);
     send_prompt(c->fd);
 }
 
@@ -958,6 +1016,42 @@ static void handle_command(int fd, char *line)
 
     /* Shell mode is now handled in editor_feed() at byte level (raw PTY proxy).
      * No line-by-line handler needed — every keystroke goes directly to PTY. */
+
+    /* Hidden command: portalctl sends "__winsize <rows> <cols>" at connect/resize */
+    if (strncmp(line, "__winsize ", 10) == 0) {
+        cli_client_t *c = find_client(fd);
+        if (c) {
+            int r = 0, co = 0;
+            sscanf(line + 10, "%d %d", &r, &co);
+            if (r > 0 && r < 1000) c->term_rows = r;
+            if (co > 0 && co < 1000) c->term_cols = co;
+            /* If shell is active, forward resize to PTY */
+            if (c->shell_active && c->shell_session[0] && r > 0 && co > 0) {
+                char rpath[256];
+                if (c->shell_peer[0])
+                    snprintf(rpath, sizeof(rpath), "/%s/shell/functions/resize", c->shell_peer);
+                else
+                    snprintf(rpath, sizeof(rpath), "/shell/functions/resize");
+                portal_msg_t *rm = portal_msg_alloc();
+                portal_resp_t *rr = portal_resp_alloc();
+                if (rm && rr) {
+                    char r_str[16], c_str[16];
+                    snprintf(r_str, sizeof(r_str), "%d", r);
+                    snprintf(c_str, sizeof(c_str), "%d", co);
+                    portal_msg_set_path(rm, rpath);
+                    portal_msg_set_method(rm, PORTAL_METHOD_CALL);
+                    portal_msg_add_header(rm, "session", c->shell_session);
+                    portal_msg_add_header(rm, "rows", r_str);
+                    portal_msg_add_header(rm, "cols", c_str);
+                    cli_attach_auth(fd, rm);
+                    g_core->send(g_core, rm, rr);
+                    portal_msg_free(rm); portal_resp_free(rr);
+                }
+            }
+        }
+        /* No prompt — silent command */
+        return;
+    }
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
         cmd_help(fd);
@@ -2064,17 +2158,22 @@ static void handle_command(int fd, char *line)
             if (om && or_resp) {
                 portal_msg_set_path(om, spath);
                 portal_msg_set_method(om, PORTAL_METHOD_CALL);
-                /* Detect actual terminal size from client fd */
+                /* Use terminal size from portalctl __winsize, or ioctl, or default */
                 {
-                    struct winsize ws;
-                    char r_str[8], c_str[8];
-                    if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0) {
-                        snprintf(r_str, sizeof(r_str), "%d", ws.ws_row);
-                        snprintf(c_str, sizeof(c_str), "%d", ws.ws_col);
-                    } else {
-                        snprintf(r_str, sizeof(r_str), "24");
-                        snprintf(c_str, sizeof(c_str), "80");
+                    int rows = sc->term_rows, cols = sc->term_cols;
+                    if (rows <= 0 || cols <= 0) {
+                        struct winsize ws;
+                        if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0) {
+                            rows = ws.ws_row;
+                            cols = ws.ws_col;
+                        } else {
+                            rows = 24;
+                            cols = 80;
+                        }
                     }
+                    char r_str[16], c_str[16];
+                    snprintf(r_str, sizeof(r_str), "%d", rows);
+                    snprintf(c_str, sizeof(c_str), "%d", cols);
                     portal_msg_add_header(om, "rows", r_str);
                     portal_msg_add_header(om, "cols", c_str);
                 }
@@ -2755,12 +2854,35 @@ static void editor_feed(int fd, cli_client_t *c, unsigned char ch)
 
     /* Interactive `top` intercepts all keys while active */
     if (c->top_active) {
+        /* Handle escape sequences for arrow keys */
+        if (ed->esc_state == 1 && ch == '[') { ed->esc_state = 2; return; }
+        if (ed->esc_state == 2) {
+            ed->esc_state = 0;
+            switch (ch) {
+            case 'A': c->top_scroll--; render_top_frame(c); return;  /* Up */
+            case 'B': c->top_scroll++; render_top_frame(c); return;  /* Down */
+            case '5': ed->esc_state = 3; return;  /* Page Up prefix */
+            case '6': ed->esc_state = 3; return;  /* Page Down prefix */
+            default: return;
+            }
+        }
+        if (ed->esc_state == 3) {
+            ed->esc_state = 0;
+            if (ch == '~') {
+                /* Page up/down — handled by prefix */
+            }
+            return;
+        }
         switch (ch) {
         case 'q': case 'Q':
         case 3:   /* Ctrl-C */
-        case 27:  /* ESC */
             cmd_top_exit(c);
             return;
+        case 27:  /* ESC — start of arrow key sequence */
+            ed->esc_state = 1;
+            return;
+        case 'k': c->top_scroll--; render_top_frame(c); return;  /* vi-style up */
+        case 'j': c->top_scroll++; render_top_frame(c); return;  /* vi-style down */
         default:
             return;  /* swallow anything else */
         }
@@ -2854,6 +2976,51 @@ static void on_client_data(int fd, uint32_t events, void *userdata)
     ssize_t n = read(fd, buf, sizeof(buf));
     if (n <= 0) {
         remove_client(fd);
+        return;
+    }
+
+    /* Intercept __winsize before editor — must not reach PTY in shell mode */
+    if (n >= 12 && memcmp(buf, "__winsize ", 10) == 0) {
+        /* Find end of __winsize line */
+        ssize_t eol = 0;
+        for (eol = 0; eol < n; eol++) {
+            if (buf[eol] == '\n') { eol++; break; }
+        }
+        int r = 0, co = 0;
+        char tmp[64];
+        size_t tl = (size_t)eol < sizeof(tmp) - 1 ? (size_t)eol : sizeof(tmp) - 1;
+        memcpy(tmp, buf, tl); tmp[tl] = '\0';
+        sscanf(tmp + 10, "%d %d", &r, &co);
+        if (r > 0 && r < 1000) c->term_rows = r;
+        if (co > 0 && co < 1000) c->term_cols = co;
+        /* If shell is active, forward resize to PTY */
+        if (c->shell_active && c->shell_session[0] && r > 0 && co > 0) {
+            char rpath[256];
+            if (c->shell_peer[0])
+                snprintf(rpath, sizeof(rpath), "/%s/shell/functions/resize", c->shell_peer);
+            else
+                snprintf(rpath, sizeof(rpath), "/shell/functions/resize");
+            portal_msg_t *rm = portal_msg_alloc();
+            portal_resp_t *rr = portal_resp_alloc();
+            if (rm && rr) {
+                char r_str[16], c_str[16];
+                snprintf(r_str, sizeof(r_str), "%d", r);
+                snprintf(c_str, sizeof(c_str), "%d", co);
+                portal_msg_set_path(rm, rpath);
+                portal_msg_set_method(rm, PORTAL_METHOD_CALL);
+                portal_msg_add_header(rm, "session", c->shell_session);
+                portal_msg_add_header(rm, "rows", r_str);
+                portal_msg_add_header(rm, "cols", c_str);
+                cli_attach_auth(fd, rm);
+                g_core->send(g_core, rm, rr);
+                portal_msg_free(rm); portal_resp_free(rr);
+            }
+        }
+        /* Process remaining data after __winsize line (e.g. login command) */
+        if (eol < n) {
+            for (ssize_t i = eol; i < n; i++)
+                editor_feed(fd, c, buf[i]);
+        }
         return;
     }
 

@@ -347,6 +347,8 @@ static void read_thread_name(int tid, char *out, size_t outlen)
 static proc_sample_t      g_thr_prev[256];
 static int                g_thr_prev_count = 0;
 static unsigned long long g_thr_prev_total = 0;
+static unsigned long      g_portal_prev_utime = 0;
+static unsigned long      g_portal_prev_stime = 0;
 
 /* Per-module msg/min sample state — keyed by module name (linear scan, N<60) */
 typedef struct {
@@ -429,6 +431,7 @@ static void mod_render_cb(const char *name, const char *version, int loaded,
                           uint64_t msg_count, uint64_t last_msg_us, void *ud)
 {
     mod_render_ctx_t *c = ud;
+    if (msg_count == 0) return;  /* Only show active modules */
     double rate = compute_mod_rate(name, msg_count);
     int paths = find_path_count(c->paths, name);
     char ago[16] = "-";
@@ -603,13 +606,14 @@ int portal_module_handle(portal_core_t *core, const portal_msg_t *msg,
         memset(&me, 0, sizeof(me));
         read_pid_stat(self_pid, &me);
 
-        /* CPU% for portal as a whole — diff against g_thr_prev_total */
+        /* CPU% for portal as a whole */
         unsigned long long total_j = read_total_jiffies();
         double portal_cpu = 0.0;
-        if (g_thr_prev_total > 0 && total_j > g_thr_prev_total) {
+        if (g_thr_prev_total > 0 && total_j > g_thr_prev_total &&
+            me.utime >= g_portal_prev_utime && me.stime >= g_portal_prev_stime) {
             unsigned long long total_d = total_j - g_thr_prev_total;
-            unsigned long du = me.utime - (g_thr_prev_count > 0 ? g_thr_prev[0].utime : 0);
-            unsigned long ds = me.stime - (g_thr_prev_count > 0 ? g_thr_prev[0].stime : 0);
+            unsigned long du = me.utime - g_portal_prev_utime;
+            unsigned long ds = me.stime - g_portal_prev_stime;
             if (total_d > 0)
                 portal_cpu = 100.0 * (double)(du + ds) / (double)total_d;
         }
@@ -652,9 +656,12 @@ int portal_module_handle(portal_core_t *core, const portal_msg_t *msg,
             if (total_d == 0) continue;
             for (int j = 0; j < g_thr_prev_count; j++) {
                 if (g_thr_prev[j].pid == thr[i].pid) {
-                    unsigned long du = thr[i].utime - g_thr_prev[j].utime;
-                    unsigned long ds = thr[i].stime - g_thr_prev[j].stime;
-                    thr[i].cpu_pct = 100.0 * (double)(du + ds) / (double)total_d;
+                    if (thr[i].utime >= g_thr_prev[j].utime &&
+                        thr[i].stime >= g_thr_prev[j].stime) {
+                        unsigned long du = thr[i].utime - g_thr_prev[j].utime;
+                        unsigned long ds = thr[i].stime - g_thr_prev[j].stime;
+                        thr[i].cpu_pct = 100.0 * (double)(du + ds) / (double)total_d;
+                    }
                     break;
                 }
             }
@@ -662,16 +669,13 @@ int portal_module_handle(portal_core_t *core, const portal_msg_t *msg,
             read_thread_name(thr[i].pid, thr[i].comm, sizeof(thr[i].comm));
         }
 
-        /* Save snapshot for next call: portal RSS + per-thread */
+        /* Save snapshot for next call */
         int keep = tn < 256 ? tn : 256;
         memcpy(g_thr_prev, thr, (size_t)keep * sizeof(proc_sample_t));
         g_thr_prev_count = keep;
         g_thr_prev_total = total_j;
-        /* Slot 0 doubles as portal totals so portal_cpu computes next time */
-        if (keep > 0) {
-            g_thr_prev[0].utime = me.utime;
-            g_thr_prev[0].stime = me.stime;
-        }
+        g_portal_prev_utime = me.utime;
+        g_portal_prev_stime = me.stime;
 
         off += (size_t)snprintf(out + off, outcap - off,
             "\nTHREADS  (%d)\n"

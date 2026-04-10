@@ -1,6 +1,6 @@
 # mod_shell — Remote Interactive Shell via Federation
 
-SSH-quality interactive terminal access to any federated Portal peer. Uses real PTY (`forkpty()`) — htop, vi, top, less, sudo all work.
+SSH-quality interactive terminal access to any federated Portal peer. Uses real PTY (`forkpty()`) — htop, vi, top, less, sudo all work with full terminal rendering.
 
 ## Quick Start
 
@@ -8,7 +8,7 @@ SSH-quality interactive terminal access to any federated Portal peer. Uses real 
 portal:/> shell ssip888
 Connected to ssip888 (Ctrl-] to disconnect)
 root@ssipdev:~# htop
-(full interactive display, live updates)
+(full interactive display, fills entire terminal)
 root@ssipdev:~# ^]
 Disconnected
 portal:/>
@@ -16,11 +16,28 @@ portal:/>
 
 ## How It Works
 
+- **Real PTY**: `forkpty()` allocates a kernel pseudo-terminal — full ncurses, job control, signals
 - **Raw byte proxy**: every keystroke goes directly to the remote PTY (no local line editing)
-- **10Hz output streaming**: a timer reads PTY output every 100ms and writes to the client terminal
+- **10Hz output streaming**: a timer reads PTY output every 100ms and writes to the client
+- **Immediate echo**: each keystroke triggers an instant read after write (sub-ms latency)
+- **Terminal size propagation**: `portal -r` and `portalctl` send `__winsize <rows> <cols>` at connect time
+- **SIGWINCH forwarding**: terminal resize during shell session sends resize to remote PTY in real-time
 - **ANSI passthrough**: escape sequences pass through untouched — full terminal rendering
+- **Clean exit**: terminal reset on disconnect (`\033[?25h\033[0m\033[?1049l\033c`)
+- **Auto-disconnect**: PTY child death detected via `waitpid(WNOHANG)`, triggers clean exit
 - **Ctrl-]** (0x1D): disconnect and return to Portal CLI (like telnet)
-- **Bidirectional**: device → hub and hub → device both work
+- **Bidirectional**: device → hub and hub → device both work via federation
+
+## Terminal Size
+
+Terminal dimensions are propagated through the full chain:
+
+1. `portal -r` / `portalctl` detects terminal size via `ioctl(TIOCGWINSZ)`
+2. Sends `__winsize <rows> <cols>` hidden command to mod_cli
+3. mod_cli stores dimensions in client state (`term_rows`, `term_cols`)
+4. On `shell <peer>`, dimensions are sent as `rows`/`cols` headers to `/shell/functions/open`
+5. mod_shell sets PTY size via `ioctl(master_fd, TIOCSWINSZ, &ws)`
+6. On terminal resize (SIGWINCH), new dimensions forwarded via `/shell/functions/resize`
 
 ## Paths
 
@@ -60,8 +77,25 @@ curl -u root:<pass> -X PUT "http://host:8080/api/shell/functions/exec?cmd=hostna
 SID=$(curl -s -u root:<pass> -X PUT "http://host:8080/api/shell/functions/open?rows=24&cols=80")
 curl -s -u root:<pass> -X PUT "http://host:8080/api/shell/functions/write?session=$SID" -d "ls -la"
 curl -s -u root:<pass> -X PUT "http://host:8080/api/shell/functions/read?session=$SID"
+curl -s -u root:<pass> -X PUT "http://host:8080/api/shell/functions/resize?session=$SID&rows=50&cols=120"
 curl -s -u root:<pass> -X PUT "http://host:8080/api/shell/functions/close?session=$SID"
 
 # Remote via federation
 curl -u root:<pass> -X PUT "http://hub:8090/api/ssip888/shell/functions/exec?cmd=uptime"
 ```
+
+## CLI Integration
+
+The `shell` command in mod_cli provides the interactive experience:
+
+```
+portal:/> shell              # Local shell on this machine
+portal:/> shell ssip888      # Remote shell via federation
+portal:/> shell ssip-hub     # Shell into the hub
+```
+
+Features:
+- Raw byte proxy mode (bypasses line editor)
+- Ctrl-] to disconnect cleanly
+- Terminal reset on exit (cursor, colors, alternate screen buffer)
+- Works through `portal -n <name> -r` and `portalctl`

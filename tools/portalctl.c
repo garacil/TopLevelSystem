@@ -1,21 +1,4 @@
 /*
- * Author: Germán Luis Aracil Boned <garacilb@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
  * portalctl — CLI client for Portal
  *
  * Connects to Portal's UNIX socket and sends commands.
@@ -35,9 +18,21 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/ioctl.h>
+#include <signal.h>
 #include <errno.h>
 
 #define DEFAULT_SOCKET "/var/run/portal.sock"
+
+static volatile sig_atomic_t g_winch = 0;
+static int g_sockfd = -1;
+
+static void handle_sigwinch(int sig)
+{
+    (void)sig;
+    g_winch = 1;
+}
+
 #define BUF_SIZE       8192
 
 static int connect_to_portal(const char *socket_path)
@@ -104,7 +99,29 @@ static int run_interactive(const char *socket_path)
         raw_term.c_cc[VMIN] = 1;
         raw_term.c_cc[VTIME] = 0;
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_term);
+
+        /* Send terminal size to server so shell mode uses real dimensions */
+        struct winsize ws;
+        if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) {
+            char wscmd[64];
+            snprintf(wscmd, sizeof(wscmd), "__winsize %d %d\r\n", ws.ws_row, ws.ws_col);
+            write(fd, wscmd, strlen(wscmd));
+            /* Consume response silently */
+            char wbuf[256];
+            struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+            fd_set wfds; FD_ZERO(&wfds); FD_SET(fd, &wfds);
+            if (select(fd + 1, &wfds, NULL, NULL, &tv) > 0)
+                (void)read(fd, wbuf, sizeof(wbuf));
+        }
     }
+
+    /* SIGWINCH: propagate terminal resize to server */
+    g_sockfd = fd;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_sigwinch;
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGWINCH, &sa, NULL);
 
     /* Bidirectional: stdin ↔ socket */
     fd_set rfds;
@@ -112,6 +129,17 @@ static int run_interactive(const char *socket_path)
     int running = 1;
 
     while (running) {
+        /* Check for pending terminal resize */
+        if (g_winch) {
+            g_winch = 0;
+            struct winsize ws;
+            if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) {
+                char wscmd[64];
+                snprintf(wscmd, sizeof(wscmd), "__winsize %d %d\r\n", ws.ws_row, ws.ws_col);
+                write(fd, wscmd, strlen(wscmd));
+            }
+        }
+
         FD_ZERO(&rfds);
         FD_SET(STDIN_FILENO, &rfds);
         FD_SET(fd, &rfds);

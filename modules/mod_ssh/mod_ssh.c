@@ -86,6 +86,7 @@ static void handle_ssh_client(ssh_session session)
     ssh_message msg_ssh;
     int authenticated = 0;
     char username[64] = "";
+    char password[128] = "";
 
     while ((msg_ssh = ssh_message_get(session)) != NULL) {
         if (ssh_message_type(msg_ssh) == SSH_REQUEST_AUTH &&
@@ -99,6 +100,7 @@ static void handle_ssh_client(ssh_session session)
             if (portal_ssh_auth(user, pass)) {
                 ssh_message_auth_reply_success(msg_ssh, 0);
                 snprintf(username, sizeof(username), "%s", user);
+                snprintf(password, sizeof(password), "%s", pass);
                 authenticated = 1;
                 ssh_message_free(msg_ssh);
                 break;
@@ -136,17 +138,26 @@ static void handle_ssh_client(ssh_session session)
         return;
     }
 
-    /* Wait for shell or pty request */
-    int got_shell = 0;
-    while ((msg_ssh = ssh_message_get(session)) != NULL) {
+    /* Wait for PTY and shell requests (clients send PTY first, then shell) */
+    int got_pty = 0, got_shell = 0;
+    int pty_rows = 24, pty_cols = 80;
+    while (!got_shell && (msg_ssh = ssh_message_get(session)) != NULL) {
         int type = ssh_message_type(msg_ssh);
         int subtype = ssh_message_subtype(msg_ssh);
         if (type == SSH_REQUEST_CHANNEL) {
-            if (subtype == SSH_CHANNEL_REQUEST_SHELL ||
-                subtype == SSH_CHANNEL_REQUEST_PTY) {
+            if (subtype == SSH_CHANNEL_REQUEST_PTY) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+                pty_cols = ssh_message_channel_request_pty_width(msg_ssh);
+                pty_rows = ssh_message_channel_request_pty_height(msg_ssh);
+#pragma GCC diagnostic pop
+                if (pty_cols <= 0) pty_cols = 80;
+                if (pty_rows <= 0) pty_rows = 24;
                 ssh_message_channel_request_reply_success(msg_ssh);
-                if (subtype == SSH_CHANNEL_REQUEST_SHELL)
-                    got_shell = 1;
+                got_pty = 1;
+            } else if (subtype == SSH_CHANNEL_REQUEST_SHELL) {
+                ssh_message_channel_request_reply_success(msg_ssh);
+                got_shell = 1;
             } else {
                 ssh_message_reply_default(msg_ssh);
             }
@@ -154,8 +165,8 @@ static void handle_ssh_client(ssh_session session)
             ssh_message_reply_default(msg_ssh);
         }
         ssh_message_free(msg_ssh);
-        if (got_shell) break;
     }
+    (void)got_pty;
 
     /* Send welcome banner */
     char banner[256];
@@ -195,28 +206,34 @@ static void handle_ssh_client(ssh_session session)
         return;
     }
 
-    /* Auto-login on CLI */
-    char login_cmd[128];
-    snprintf(login_cmd, sizeof(login_cmd), "login %s portal\r\n", username);
+    /* Send terminal size before anything else */
+    {
+        char wscmd[64];
+        snprintf(wscmd, sizeof(wscmd), "__winsize %d %d\r\n", pty_rows, pty_cols);
+        write(cli_fd, wscmd, strlen(wscmd));
+    }
+
+    /* Auto-login on CLI with the same credentials used for SSH */
+    char login_cmd[256];
+    snprintf(login_cmd, sizeof(login_cmd), "login %s %s\r\n", username, password);
     write(cli_fd, login_cmd, strlen(login_cmd));
+    memset(password, 0, sizeof(password));  /* Clear password from memory */
 
     /* Bridge: SSH channel ↔ CLI socket */
     char buf[SSH_BUF_SIZE];
     fd_set rfds;
-    int chan_fd = ssh_get_fd(session);
+    ssh_set_blocking(session, 0);  /* Non-blocking for message_get in loop */
 
     while (g_running && ssh_channel_is_open(chan) && !ssh_channel_is_eof(chan)) {
+        /* Use short timeout so we poll SSH channel frequently */
         FD_ZERO(&rfds);
         FD_SET(cli_fd, &rfds);
-        FD_SET(chan_fd, &rfds);
-        int maxfd = cli_fd > chan_fd ? cli_fd : chan_fd;
-
-        struct timeval tv = {1, 0};
-        int sel = select(maxfd + 1, &rfds, NULL, NULL, &tv);
-        if (sel < 0) break;
+        struct timeval tv = {0, 50000};  /* 50ms */
+        int sel = select(cli_fd + 1, &rfds, NULL, NULL, &tv);
+        if (sel < 0 && errno != EINTR) break;
 
         /* Data from CLI → SSH (translate \n to \r\n for terminal) */
-        if (FD_ISSET(cli_fd, &rfds)) {
+        if (sel > 0 && FD_ISSET(cli_fd, &rfds)) {
             char raw[SSH_BUF_SIZE];
             ssize_t n = read(cli_fd, raw, sizeof(raw) / 2);
             if (n <= 0) break;
@@ -230,14 +247,41 @@ static void handle_ssh_client(ssh_session session)
             ssh_channel_write(chan, buf, (uint32_t)out);
         }
 
-        /* Data from SSH → CLI */
-        if (ssh_channel_poll(chan, 0) > 0) {
+        /* Data from SSH → CLI (always poll, not fd-based) */
+        int avail = ssh_channel_poll(chan, 0);
+        if (avail > 0) {
             int n = ssh_channel_read_nonblocking(chan, buf, sizeof(buf), 0);
             if (n > 0) {
                 write(cli_fd, buf, (size_t)n);
             } else if (n < 0) {
                 break;
             }
+        } else if (avail == SSH_EOF) {
+            break;
+        }
+
+        /* Handle window-change requests */
+        msg_ssh = ssh_message_get(session);
+        if (msg_ssh) {
+            int type = ssh_message_type(msg_ssh);
+            int subtype = ssh_message_subtype(msg_ssh);
+            if (type == SSH_REQUEST_CHANNEL &&
+                subtype == SSH_CHANNEL_REQUEST_WINDOW_CHANGE) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+                int new_cols = ssh_message_channel_request_pty_width(msg_ssh);
+                int new_rows = ssh_message_channel_request_pty_height(msg_ssh);
+#pragma GCC diagnostic pop
+                if (new_rows > 0 && new_cols > 0) {
+                    char wscmd[64];
+                    snprintf(wscmd, sizeof(wscmd), "__winsize %d %d\r\n", new_rows, new_cols);
+                    write(cli_fd, wscmd, strlen(wscmd));
+                }
+                ssh_message_channel_request_reply_success(msg_ssh);
+            } else {
+                ssh_message_reply_default(msg_ssh);
+            }
+            ssh_message_free(msg_ssh);
         }
     }
 
