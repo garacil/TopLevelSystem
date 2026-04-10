@@ -1,21 +1,4 @@
 /*
- * Author: Germán Luis Aracil Boned <garacilb@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
  * core_path.c — Path registry with label-based ACL
  *
  * Hash table backed O(1) path lookup. Supports label-based
@@ -115,6 +98,15 @@ int portal_path_add_label(portal_path_tree_t *tree, const char *path,
     path_entry_t *entry = portal_ht_get(&tree->table, path);
     if (!entry) return -1;
     return portal_labels_add(&entry->labels, label);
+}
+
+int portal_path_set_description(portal_path_tree_t *tree, const char *path,
+                                 const char *description)
+{
+    path_entry_t *entry = portal_ht_get(&tree->table, path);
+    if (!entry) return -1;
+    snprintf(entry->description, sizeof(entry->description), "%s", description);
+    return 0;
 }
 
 int portal_path_remove_label(portal_path_tree_t *tree, const char *path,

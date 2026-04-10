@@ -84,6 +84,13 @@ static int api_path_remove_label(portal_core_t *core, const char *path,
     return portal_path_remove_label(&inst->paths, path, label);
 }
 
+static int api_path_set_description(portal_core_t *core, const char *path,
+                                     const char *description)
+{
+    portal_instance_t *inst = core->_internal;
+    return portal_path_set_description(&inst->paths, path, description);
+}
+
 static int api_send(portal_core_t *core, portal_msg_t *msg, portal_resp_t *resp)
 {
     portal_instance_t *inst = core->_internal;
@@ -694,8 +701,9 @@ void portal_instance_setup_api(portal_instance_t *inst)
     inst->api.path_register     = api_path_register;
     inst->api.path_unregister   = api_path_unregister;
     inst->api.path_set_access   = api_path_set_access;
-    inst->api.path_add_label    = api_path_add_label;
-    inst->api.path_remove_label = api_path_remove_label;
+    inst->api.path_add_label         = api_path_add_label;
+    inst->api.path_remove_label      = api_path_remove_label;
+    inst->api.path_set_description   = api_path_set_description;
     inst->api.send              = api_send;
     inst->api.subscribe         = api_subscribe;
     inst->api.unsubscribe       = api_unsubscribe;

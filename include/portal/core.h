@@ -54,6 +54,10 @@ struct portal_core {
     int  (*path_add_label)(portal_core_t *core, const char *path, const char *label);
     int  (*path_remove_label)(portal_core_t *core, const char *path, const char *label);
 
+    /* Path description (for help system) */
+    int  (*path_set_description)(portal_core_t *core, const char *path,
+                                  const char *description);
+
     /* Module queries */
     int  (*module_loaded)(portal_core_t *core, const char *name);
 

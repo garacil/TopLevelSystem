@@ -1,21 +1,4 @@
 /*
- * Author: Germán Luis Aracil Boned <garacilb@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
  * core_path.h — Path registry with hash table lookup and label-based ACL
  */
 
@@ -31,6 +14,7 @@ typedef struct {
     char             module_name[PORTAL_MAX_MODULE_NAME];
     portal_labels_t  labels;
     uint8_t          access_mode;   /* PORTAL_ACCESS_READ/WRITE/RW (Law 8) */
+    char             description[256]; /* Human-readable description for help system */
 } path_entry_t;
 
 /* Path registry — hash table for O(1) lookups */
@@ -66,6 +50,10 @@ int  portal_path_add_label(portal_path_tree_t *tree, const char *path,
 /* Remove a label from a path. Returns 0 on success. */
 int  portal_path_remove_label(portal_path_tree_t *tree, const char *path,
                                const char *label);
+
+/* Set description on a path. Returns 0 on success. */
+int  portal_path_set_description(portal_path_tree_t *tree, const char *path,
+                                  const char *description);
 
 /* Get labels for a path. Returns pointer to labels or NULL. */
 const portal_labels_t *portal_path_get_labels(portal_path_tree_t *tree,

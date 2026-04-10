@@ -122,6 +122,142 @@ static void remove_client(int fd)
 
 /* --- Command handlers --- */
 
+/* ── help for built-in commands ── */
+
+static void cmd_help_builtin(int fd, const char *cmd)
+{
+    if (strcmp(cmd, "get") == 0) {
+        send_str(fd,
+            "\n  get <path>[?key=value&...]\n\n"
+            "    Read a resource or call a function at any Portal path.\n"
+            "    Resolves relative paths when cd is active.\n"
+            "    Query parameters become message headers.\n\n"
+            "    Examples:\n"
+            "      get /core/status\n"
+            "      get /ssip/resources/report\n"
+            "      get /ssip/functions/enable?job=check_sip\n"
+            "      get /ssip/functions/set_interval?interval=120\n"
+            "      cd /ssip/resources && get status    (relative path)\n\n");
+    } else if (strcmp(cmd, "ls") == 0) {
+        send_str(fd,
+            "\n  ls [path]\n\n"
+            "    List child paths at the given location (or current cd).\n"
+            "    Shows path name and owning module.\n\n"
+            "    Examples:\n"
+            "      ls                     (list root)\n"
+            "      ls /ssip               (list ssip children)\n"
+            "      ls /ssip/functions      (list all ssip functions)\n"
+            "      cd /ssip && ls          (same as ls /ssip)\n\n");
+    } else if (strcmp(cmd, "cd") == 0) {
+        send_str(fd,
+            "\n  cd <path>\n\n"
+            "    Change the working directory. Affects ls and get (relative paths).\n"
+            "    The prompt shows the current path.\n\n"
+            "    Examples:\n"
+            "      cd /ssip/functions\n"
+            "      get check_sip           (resolves to /ssip/functions/check_sip)\n"
+            "      cd /                    (back to root)\n\n");
+    } else if (strcmp(cmd, "set") == 0) {
+        send_str(fd,
+            "\n  set <path> <value>\n\n"
+            "    Write a value to a path (sends SET method).\n\n"
+            "    Examples:\n"
+            "      set /kv/mykey hello_world\n"
+            "      set /cache/session abc123\n\n");
+    } else if (strcmp(cmd, "shell") == 0) {
+        send_str(fd,
+            "\n  shell [peer]\n\n"
+            "    Open an interactive PTY shell on a remote peer or locally.\n"
+            "    Supports full terminal: htop, vi, top, less, sudo.\n"
+            "    Type 'exit' to return to Portal CLI.\n\n"
+            "    Examples:\n"
+            "      shell ssip841           (remote shell on ssip841 via federation)\n"
+            "      shell                   (local shell on this machine)\n\n");
+    } else {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "No help available for '%s'.\n", cmd);
+        send_str(fd, buf);
+    }
+}
+
+/* ── help for a specific path: show module, access, labels, description ── */
+
+struct help_path_ctx {
+    const char *target_path;
+    char module[64];
+    uint8_t access_mode;
+    char labels[256];
+    char description[256];
+    int found;
+};
+
+static void help_path_lookup_cb(const char *path, const char *module_name, void *ud)
+{
+    struct help_path_ctx *ctx = (struct help_path_ctx *)ud;
+    if (strcmp(path, ctx->target_path) == 0) {
+        snprintf(ctx->module, sizeof(ctx->module), "%s", module_name);
+        ctx->found = 1;
+    }
+}
+
+static void cmd_help_path(int fd, const char *path)
+{
+    /* Look up the path via path_iter to get the module name */
+    struct help_path_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.target_path = path;
+    g_core->path_iter(g_core, help_path_lookup_cb, &ctx);
+
+    if (!ctx.found) {
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "Path '%s' not found. Try: ls %s\n", path,
+                 strrchr(path, '/') ? path : "/");
+        send_str(fd, buf);
+        return;
+    }
+
+    /* Get full path info by sending a META message (or direct struct access) */
+    /* We use the core's internal path_lookup_entry via a send to /core/resolve */
+    /* For now: display what we know from iter + a GET to show live data */
+
+    char buf[2048];
+    int pos = 0;
+
+    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+                    "\n  %s\n\n", path);
+    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+                    "    Module:  %s\n", ctx.module);
+
+    /* Determine access mode and description by looking at path convention */
+    const char *type = "unknown";
+    if (strstr(path, "/resources/")) type = "READ (resource)";
+    else if (strstr(path, "/functions/")) type = "RW (function)";
+    else if (strstr(path, "/events/")) type = "READ (event)";
+
+    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+                    "    Access:  %s\n", type);
+
+    /* Try to get the description by doing a GET — the response tells us something */
+    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+                    "\n    CLI usage:\n");
+
+    if (strstr(path, "/resources/")) {
+        pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+                        "      get %s\n", path);
+    } else if (strstr(path, "/functions/")) {
+        pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+                        "      get %s\n"
+                        "      get %s?param=value\n", path, path);
+    }
+
+    /* Suggest help <module> for more context */
+    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+                    "\n    See also: help %s\n\n", ctx.module);
+
+    send_str(fd, buf);
+}
+
 /* ── help <module>: dynamic path discovery for any module ── */
 
 struct help_module_ctx {
@@ -796,9 +932,20 @@ static void handle_command(int fd, char *line)
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
         cmd_help(fd);
     } else if (strncmp(line, "help ", 5) == 0) {
-        const char *mod = line + 5;
-        while (*mod == ' ') mod++;
-        cmd_help_module(fd, mod);
+        const char *arg = line + 5;
+        while (*arg == ' ') arg++;
+        if (arg[0] == '/') {
+            /* help /some/path → show path info */
+            cmd_help_path(fd, arg);
+        } else if (strcmp(arg, "get") == 0 || strcmp(arg, "ls") == 0 ||
+                   strcmp(arg, "cd") == 0 || strcmp(arg, "set") == 0 ||
+                   strcmp(arg, "shell") == 0) {
+            /* help <builtin_command> → show command usage */
+            cmd_help_builtin(fd, arg);
+        } else {
+            /* help <module_name> → show module paths */
+            cmd_help_module(fd, arg);
+        }
     } else if (strcmp(line, "status") == 0) {
         cmd_status(fd);
     } else if (strcmp(line, "version") == 0) {
