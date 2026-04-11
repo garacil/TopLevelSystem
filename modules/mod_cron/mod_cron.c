@@ -121,10 +121,27 @@ int portal_module_load(portal_core_t *core)
     core->path_set_access(core, "/cron/functions/trigger", PORTAL_ACCESS_RW);
     core->path_set_description(core, "/cron/functions/trigger", "Force immediate run. Header: name");
 
-    /* Jobs are checked on every handle() call and via trigger */
+    /* Autonomous 1 Hz tick.
+     *
+     * Previously this module relied on external traffic to /cron/...
+     * hitting portal_module_handle() to drive cron_tick(). On a host
+     * that doesn't get any HTTP/CLI probes to /cron/... scheduled jobs
+     * never fired, regardless of their interval. That broke every
+     * module that depends on mod_cron for periodic work — notably
+     * mod_ssip's check_sip probe on SSIP devices, which could not
+     * detect Asterisk failure without something externally polling
+     * /cron/resources/jobs in a loop.
+     *
+     * Registering a 1 Hz timer on the core event loop makes cron_tick()
+     * run once per second regardless of external traffic. The tick
+     * body is cheap: iterate g_jobs[], check (now - last_run) against
+     * each interval, dispatch any that are due via core->send(). For
+     * g_job_count < 100 it's a few hundred ns per tick with no I/O
+     * on the common path. No new allocation, no blocking syscall. */
+    core->timer_add(core, 1.0, cron_tick, NULL);
 
     core->log(core, PORTAL_LOG_INFO, "cron",
-              "Cron scheduler ready (max: %d jobs)", g_max_jobs);
+              "Cron scheduler ready (max: %d jobs, autonomous 1 Hz tick)", g_max_jobs);
     return PORTAL_MODULE_OK;
 }
 
