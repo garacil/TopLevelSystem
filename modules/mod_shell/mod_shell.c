@@ -32,12 +32,12 @@
  * The CLI "shell <peer>" command uses mode 2 transparently.
  *
  * Paths:
- *   /shell/functions/exec    RW (admin)  Single command (stateless)
- *   /shell/functions/open    RW (admin)  Open PTY session → session_id
- *   /shell/functions/write   RW (admin)  Send input to PTY session
- *   /shell/functions/read    RW (admin)  Read output from PTY session
- *   /shell/functions/close   RW (admin)  Close PTY session
- *   /shell/functions/resize  RW (admin)  Set terminal size (rows, cols)
+ *   /shell/functions/exec    RW (access_label)  Single command (stateless)
+ *   /shell/functions/open    RW (access_label)  Open PTY session → session_id
+ *   /shell/functions/write   RW (access_label)  Send input to PTY session
+ *   /shell/functions/read    RW (access_label)  Read output from PTY session
+ *   /shell/functions/close   RW (access_label)  Close PTY session
+ *   /shell/functions/resize  RW (access_label)  Set terminal size (rows, cols)
  *
  * Events:
  *   /events/shell/exec       Single command executed
@@ -85,6 +85,7 @@ static struct {
     int  allow_exec;
     int  max_output;
     int  session_ttl;
+    char access_label[64];  /* group/label required to use shell (default: root) */
 } g_cfg;
 
 static portal_core_t *g_core;
@@ -485,36 +486,40 @@ int portal_module_load(portal_core_t *core)
     v = core->config_get(core, "shell", "session_ttl");
     g_cfg.session_ttl = v ? atoi(v) : SHELL_SESSION_TTL;
 
+    v = core->config_get(core, "shell", "access_label");
+    snprintf(g_cfg.access_label, sizeof(g_cfg.access_label), "%s",
+             v ? v : "root");
+
     /* Register paths */
     core->path_register(core, "/shell/functions/exec", "shell");
     core->path_set_access(core, "/shell/functions/exec", PORTAL_ACCESS_RW);
     core->path_set_description(core, "/shell/functions/exec", "Execute a command (stateless). Header: cmd, optional: cwd, timeout");
-    core->path_add_label(core, "/shell/functions/exec", "admin");
+    core->path_add_label(core, "/shell/functions/exec", g_cfg.access_label);
 
     core->path_register(core, "/shell/functions/open", "shell");
     core->path_set_access(core, "/shell/functions/open", PORTAL_ACCESS_RW);
     core->path_set_description(core, "/shell/functions/open", "Open PTY session. Returns session_id. Optional headers: rows, cols");
-    core->path_add_label(core, "/shell/functions/open", "admin");
+    core->path_add_label(core, "/shell/functions/open", g_cfg.access_label);
 
     core->path_register(core, "/shell/functions/write", "shell");
     core->path_set_access(core, "/shell/functions/write", PORTAL_ACCESS_RW);
     core->path_set_description(core, "/shell/functions/write", "Send input to PTY. Header: session. Body: raw bytes");
-    core->path_add_label(core, "/shell/functions/write", "admin");
+    core->path_add_label(core, "/shell/functions/write", g_cfg.access_label);
 
     core->path_register(core, "/shell/functions/read", "shell");
     core->path_set_access(core, "/shell/functions/read", PORTAL_ACCESS_RW);
     core->path_set_description(core, "/shell/functions/read", "Read output from PTY. Header: session");
-    core->path_add_label(core, "/shell/functions/read", "admin");
+    core->path_add_label(core, "/shell/functions/read", g_cfg.access_label);
 
     core->path_register(core, "/shell/functions/close", "shell");
     core->path_set_access(core, "/shell/functions/close", PORTAL_ACCESS_RW);
     core->path_set_description(core, "/shell/functions/close", "Close PTY session. Header: session");
-    core->path_add_label(core, "/shell/functions/close", "admin");
+    core->path_add_label(core, "/shell/functions/close", g_cfg.access_label);
 
     core->path_register(core, "/shell/functions/resize", "shell");
     core->path_set_access(core, "/shell/functions/resize", PORTAL_ACCESS_RW);
     core->path_set_description(core, "/shell/functions/resize", "Resize PTY terminal. Headers: session, rows, cols");
-    core->path_add_label(core, "/shell/functions/resize", "admin");
+    core->path_add_label(core, "/shell/functions/resize", g_cfg.access_label);
 
     /* Events */
     portal_labels_t labels = {0};
