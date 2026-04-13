@@ -64,6 +64,7 @@ CORE_SRCS   = $(CORE_DIR)/core_log.c \
               $(CORE_DIR)/core_storage.c \
               $(CORE_DIR)/core_event.c \
               $(CORE_DIR)/core_handlers.c \
+              $(CORE_DIR)/core_cli.c \
               $(CORE_DIR)/portal_instance.c
 
 CORE_OBJS   = $(patsubst %.c,$(BUILD_DIR)/%.o,$(CORE_SRCS))

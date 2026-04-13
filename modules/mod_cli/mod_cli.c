@@ -2269,8 +2269,14 @@ static void handle_command(int fd, char *line)
         remove_client(fd);
         return;
     } else {
+        /* Try registered CLI commands (modules register via portal_cli_register) */
+        const char *cli_args = NULL;
+        portal_cli_entry_t *cli_entry = portal_cli_find(g_core, line, &cli_args);
+        if (cli_entry && cli_entry->handler) {
+            cli_entry->handler(g_core, fd, line, cli_args ? cli_args : "");
+        }
         /* Try treating the unknown command as a path: get /<line> */
-        if (line[0] != '/' && strchr(line, ' ') == NULL && strlen(line) > 1) {
+        else if (line[0] != '/' && strchr(line, ' ') == NULL && strlen(line) > 1) {
             /* Could be a module name — suggest help */
             char buf[256];
             snprintf(buf, sizeof(buf),
@@ -2425,6 +2431,45 @@ static void editor_right(int fd, cli_client_t *c)
 /* --- Tab completion --- */
 
 #define TAB_MAX_MATCHES 64
+
+/* Callback context for collecting first words from registered CLI entries */
+typedef struct {
+    char (*matches)[128];
+    int  *match_count;
+    const char *prefix;
+    size_t prefix_len;
+} cli_tab_ctx_t;
+
+static void cli_tab_collect_first_word(const portal_cli_entry_t *e, void *ud)
+{
+    cli_tab_ctx_t *ctx = (cli_tab_ctx_t *)ud;
+    if (!e->words) return;
+
+    /* Extract first word from pattern */
+    char first[128];
+    int fi = 0;
+    while (e->words[fi] && e->words[fi] != ' ' && fi < 127) fi++;
+    memcpy(first, e->words, (size_t)fi);
+    first[fi] = '\0';
+
+    /* Match prefix and dedup */
+    if (ctx->prefix_len == 0 || strncmp(first, ctx->prefix, ctx->prefix_len) == 0) {
+        for (int j = 0; j < *ctx->match_count; j++)
+            if (strcmp(ctx->matches[j], first) == 0) return;
+        if (*ctx->match_count < TAB_MAX_MATCHES)
+            snprintf(ctx->matches[(*ctx->match_count)++], 128, "%s", first);
+    }
+}
+
+/* Add first words from registered CLI commands to match list */
+static void cli_add_registered_first_words(char matches[][128],
+                                            int *match_count,
+                                            const char *prefix,
+                                            size_t prefix_len)
+{
+    cli_tab_ctx_t ctx = { matches, match_count, prefix, prefix_len };
+    portal_cli_iter(g_core, cli_tab_collect_first_word, &ctx);
+}
 
 static void editor_tab_complete(int fd, cli_client_t *c)
 {
@@ -2660,6 +2705,10 @@ static void editor_tab_complete(int fd, cli_client_t *c)
             if (strncmp(commands[i], word, wlen) == 0 && match_count < TAB_MAX_MATCHES)
                 snprintf(matches[match_count++], 128, "%s", commands[i]);
         }
+
+        /* Also include first words from registered CLI commands.
+         * This ensures module-registered commands appear in tab completion. */
+        cli_add_registered_first_words(matches, &match_count, word, wlen);
 
         if (match_count == 1) {
             /* Single match — complete it */
@@ -2966,6 +3015,27 @@ static void editor_feed(int fd, cli_client_t *c, unsigned char ch)
         ed->line[0] = '\0';
         ed->pos = 0;
         ed->len = 0;
+        editor_redraw(fd, c);
+        return;
+    case 23:    /* Ctrl+W = delete word backwards */
+        if (ed->pos > 0) {
+            int end = ed->pos;
+            /* Skip trailing spaces */
+            while (ed->pos > 0 && ed->line[ed->pos - 1] == ' ')
+                ed->pos--;
+            /* Delete back to previous space or slash */
+            while (ed->pos > 0 && ed->line[ed->pos - 1] != ' ' &&
+                   ed->line[ed->pos - 1] != '/')
+                ed->pos--;
+            memmove(&ed->line[ed->pos], &ed->line[end],
+                    (size_t)(ed->len - end + 1));
+            ed->len -= (end - ed->pos);
+            editor_redraw(fd, c);
+        }
+        return;
+    case 11:    /* Ctrl+K = kill to end of line */
+        ed->line[ed->pos] = '\0';
+        ed->len = ed->pos;
         editor_redraw(fd, c);
         return;
     case 12:    /* Ctrl+L = clear screen */

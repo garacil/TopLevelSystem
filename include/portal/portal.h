@@ -32,6 +32,7 @@
 #include "constants.h"
 #include "types.h"
 #include "core.h"
+#include "cli.h"
 #include "module.h"
 
 #endif /* PORTAL_H */
