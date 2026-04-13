@@ -2087,9 +2087,11 @@ static int connect_to_peer_async(const char *name, const char *host, int port)
         peer->retry_count = 0;
         peer->next_retry_us = 0;
     } else {
-        /* Reconnect case — reset state so finalize_handshake will mark
-         * it ready on first successful handshake */
+        /* Reconnect case — reset connection state but keep retry_count
+         * and next_retry_us so backoff persists across reconnect attempts.
+         * finalize_handshake will reset retry_count to 0 on success. */
         peer->ready = 0;
+        peer->dead = 0;
         peer->ctrl_fd = -1;
         peer->worker_count = 0;
     }
@@ -2882,21 +2884,20 @@ static void reconnect_dead_peers(void)
             }
         }
 
-        /* Save config for fresh connect */
-        char save_host[256], save_name[PORTAL_MAX_MODULE_NAME];
-        int save_port = p->cfg_port;
-        snprintf(save_host, sizeof(save_host), "%s", p->cfg_host);
-        snprintf(save_name, sizeof(save_name), "%s", p->name);
+        /* Reuse existing peer struct — preserves retry_count for backoff
+         * and eliminates the remove+recreate race that caused permanent
+         * disconnect (bug: all handshakes abort before next timer tick,
+         * peer disappears from g_peers, connect_configured_peers can't
+         * find it, no one retries ever again). */
+        p->dead = 0;
+        p->ready = 0;
+        p->path_count = 0;
+        p->connected_at = 0;
 
-        /* Remove peer entry */
-        peers_remove_at(i);
-        i--;  /* re-check this index */
-
-        /* Commit 6: fresh async connect. Respects exponential backoff via
-         * peer->retry_count + next_retry_us, which connect_to_peer_async
-         * resets on success. */
-        (void)save_host; (void)save_port;  /* peer already has cfg_host/cfg_port */
-        connect_to_peer_async(save_name, save_host, save_port);
+        /* Start fresh async connections on the existing peer struct.
+         * connect_to_peer_async detects the existing peer by name and
+         * reuses it (line 2044-2051), preserving retry_count. */
+        connect_to_peer_async(p->name, p->cfg_host, p->cfg_port);
     }
 }
 
