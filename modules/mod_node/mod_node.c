@@ -191,6 +191,13 @@ static int             g_threads_per_peer = NODE_DEFAULT_THREADS;
 static char            g_node_name[PORTAL_MAX_MODULE_NAME] = "local";
 static char            g_location[256] = "";
 static char            g_gps[64] = "";       /* "lat,lon" */
+
+/* Peer advertisement control — who sees who in `node peers` */
+#define ADV_NONE      0   /* don't advertise any peers (default — privacy) */
+#define ADV_ALL       1   /* advertise all direct peers (legacy behavior) */
+#define ADV_WHITELIST 2   /* advertise only to peers in advertise_to list */
+static int             g_advertise_mode = ADV_NONE;
+static char            g_advertise_to[512] = "";  /* comma-separated whitelist */
 /* Dynamic peer registry. Each peer is a separate heap allocation so pointers
  * returned by find_peer_* stay valid across growth of the pointer array.
  * g_peers_cap starts small and doubles on demand up to NODE_MAX_PEERS. */
@@ -1005,6 +1012,7 @@ static int reload_tls_contexts(void)
 
 /* Forward declarations */
 static void on_inbound_data(int fd, uint32_t events, void *userdata);
+static int peer_in_whitelist(const char *name);
 static void mark_peer_dead_by_fd(int fd);
 static void reconnect_dead_peers(void);
 
@@ -1017,6 +1025,14 @@ static void register_indirect_peer(const char *name, int hub_idx)
     if (strcmp(name, g_node_name) == 0) return;
     for (int i = 0; i < g_peer_count; i++)
         if (strcmp(g_peers[i]->name, name) == 0) return;
+
+    /* Whitelist mode: only register indirect peers if WE are in the
+     * advertise_to list. This filters on the receiving side — the hub
+     * sends its full peer list (ADV_ALL/ADV_WHITELIST), but only
+     * whitelisted receivers actually register the indirect peers. */
+    if (g_advertise_mode == ADV_WHITELIST &&
+        !peer_in_whitelist(g_node_name))
+        return;
 
     int idx = peers_append();
     if (idx < 0) return;
@@ -1540,6 +1556,23 @@ static int drive_tls(rx_state_t *rx)
 }
 #endif
 
+/* Check if a peer name is in the comma-separated advertise_to whitelist */
+static int peer_in_whitelist(const char *name)
+{
+    if (!name || !name[0] || !g_advertise_to[0]) return 0;
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", g_advertise_to);
+    char *tok = strtok(buf, ",");
+    while (tok) {
+        while (*tok == ' ') tok++;
+        char *end = tok + strlen(tok) - 1;
+        while (end > tok && *end == ' ') *end-- = '\0';
+        if (strcasecmp(tok, name) == 0) return 1;
+        tok = strtok(NULL, ",");
+    }
+    return 0;
+}
+
 /* Build our PORTAL02 handshake bytes and queue them in tx_buf for draining.
  * Called once at TLS completion. Mirrors the bytes-on-wire format of the
  * old synchronous send_handshake(). */
@@ -1562,16 +1595,24 @@ static void drive_hs_send_build(rx_state_t *rx)
     p[0] = (uint8_t)(nlen >> 8); p[1] = (uint8_t)(nlen & 0xff); p += 2;
     memcpy(p, g_node_name, nlen); p += nlen;
 
+    /* Peer advertisement — controlled by advertise_peers config.
+     * ADV_NONE (default): don't advertise any peers. Privacy-safe.
+     * ADV_ALL: advertise all direct peers (legacy behavior).
+     * ADV_WHITELIST: advertise all — but the RECEIVING side filters
+     *   in register_indirect_peer() based on advertise_to whitelist.
+     *   (We can't filter here because remote name isn't known yet.) */
     int peer_adv_count = 0;
     uint8_t *count_pos = p;
     p += 2;
-    for (int i = 0; i < g_peer_count; i++) {
-        if (!g_peers[i]->ready || g_peers[i]->is_indirect) continue;
-        uint16_t pnlen = (uint16_t)strlen(g_peers[i]->name);
-        if (p + 2 + pnlen > buf + sizeof(buf) - 2) break;
-        p[0] = (uint8_t)(pnlen >> 8); p[1] = (uint8_t)(pnlen & 0xff); p += 2;
-        memcpy(p, g_peers[i]->name, pnlen); p += pnlen;
-        peer_adv_count++;
+    if (g_advertise_mode != ADV_NONE) {
+        for (int i = 0; i < g_peer_count; i++) {
+            if (!g_peers[i]->ready || g_peers[i]->is_indirect) continue;
+            uint16_t pnlen = (uint16_t)strlen(g_peers[i]->name);
+            if (p + 2 + pnlen > buf + sizeof(buf) - 2) break;
+            p[0] = (uint8_t)(pnlen >> 8); p[1] = (uint8_t)(pnlen & 0xff); p += 2;
+            memcpy(p, g_peers[i]->name, pnlen); p += pnlen;
+            peer_adv_count++;
+        }
     }
     count_pos[0] = (uint8_t)(peer_adv_count >> 8);
     count_pos[1] = (uint8_t)(peer_adv_count & 0xff);
@@ -3238,6 +3279,18 @@ int portal_module_load(portal_core_t *core)
         snprintf(g_key_file, sizeof(g_key_file), "%s", v);
     if ((v = core->config_get(core, "node", "tls_verify")))
         g_tls_verify = (strcmp(v, "true") == 0 || strcmp(v, "1") == 0);
+
+    /* Peer advertisement control (default: none — privacy-safe) */
+    v = core->config_get(core, "node", "advertise_peers");
+    if (v && strcmp(v, "all") == 0)
+        g_advertise_mode = ADV_ALL;
+    else if (v && strcmp(v, "whitelist") == 0)
+        g_advertise_mode = ADV_WHITELIST;
+    else
+        g_advertise_mode = ADV_NONE;
+
+    v = core->config_get(core, "node", "advertise_to");
+    if (v) snprintf(g_advertise_to, sizeof(g_advertise_to), "%s", v);
 
     /* Default cert paths from instance certs/ directory */
     if (g_tls_enabled && g_cert_file[0] == '\0') {
