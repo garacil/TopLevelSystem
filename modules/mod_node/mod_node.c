@@ -3225,10 +3225,12 @@ int portal_module_unload(portal_core_t *core)
 
 typedef struct {
     int            local_fd;     /* socketpair end — relay to caller */
-    node_peer_t   *peer;         /* target peer */
+    node_peer_t   *peer;         /* target peer (or hub for indirect) */
     worker_t      *worker;       /* pre-acquired worker (fd already removed from ev loop) */
     int            rows;
     int            cols;
+    char           target[PORTAL_MAX_MODULE_NAME]; /* actual target peer name */
+    int            indirect;     /* 1 = routing through hub */
 } shell_connect_ctx_t;
 
 static void *shell_connect_thread(void *arg)
@@ -3237,9 +3239,14 @@ static void *shell_connect_thread(void *arg)
     int lfd = c->local_fd;
     worker_t *w = c->worker;  /* already acquired on main thread */
 
-    /* Send /tunnel/shell via blocking I/O on the worker fd */
+    /* Send /tunnel/shell via blocking I/O on the worker fd.
+     * For indirect peers: send /<target>/tunnel/shell so the hub routes it. */
     portal_msg_t smsg = {0};
-    char spath[] = "/tunnel/shell";
+    char spath[256];
+    if (c->indirect)
+        snprintf(spath, sizeof(spath), "/%s/tunnel/shell", c->target);
+    else
+        snprintf(spath, sizeof(spath), "/tunnel/shell");
     smsg.path = spath;
     smsg.method = PORTAL_METHOD_CALL;
     char rs[16], cs[16];
@@ -3341,6 +3348,150 @@ shell_done:
     g_core->log(g_core, PORTAL_LOG_INFO, "node",
                 "Shell relay closed (peer '%s')", c->peer->name);
 
+    free(c);
+    return NULL;
+}
+
+/* ── Shell indirect thread: message-based relay for indirect (via hub) peers ── */
+
+static void *shell_indirect_thread(void *arg)
+{
+    shell_connect_ctx_t *c = (shell_connect_ctx_t *)arg;
+    int lfd = c->local_fd;
+    char session_id[32] = {0};
+
+    /* 1. Open PTY session on remote peer via federation routing */
+    {
+        char spath[256];
+        snprintf(spath, sizeof(spath), "/%s/shell/functions/open", c->target);
+        portal_msg_t *om = portal_msg_alloc();
+        portal_resp_t *or_resp = portal_resp_alloc();
+        if (!om || !or_resp) goto indirect_fail;
+
+        portal_msg_set_path(om, spath);
+        portal_msg_set_method(om, PORTAL_METHOD_CALL);
+        char rs[16], cs[16];
+        snprintf(rs, sizeof(rs), "%d", c->rows);
+        snprintf(cs, sizeof(cs), "%d", c->cols);
+        portal_msg_add_header(om, "rows", rs);
+        portal_msg_add_header(om, "cols", cs);
+        /* Attach root auth for federation */
+        if (!om->ctx) om->ctx = calloc(1, sizeof(portal_ctx_t));
+        if (om->ctx) {
+            om->ctx->auth.user = strdup("root");
+            om->ctx->auth.token = strdup("__federation__");
+            portal_labels_add(&om->ctx->auth.labels, "root");
+        }
+        g_core->send(g_core, om, or_resp);
+
+        if (or_resp->status == PORTAL_OK && or_resp->body && or_resp->body_len > 0) {
+            snprintf(session_id, sizeof(session_id), "%.*s",
+                     (int)(or_resp->body_len > 31 ? 31 : or_resp->body_len),
+                     (char *)or_resp->body);
+            session_id[strcspn(session_id, "\r\n")] = '\0';
+        }
+        portal_msg_free(om);
+        portal_resp_free(or_resp);
+
+        if (!session_id[0]) {
+            g_core->log(g_core, PORTAL_LOG_ERROR, "node",
+                        "Shell indirect: failed to open session on '%s'", c->target);
+            goto indirect_fail;
+        }
+    }
+
+    g_core->log(g_core, PORTAL_LOG_INFO, "node",
+                "Shell indirect connected to '%s' session '%s'", c->target, session_id);
+
+    /* 2. Relay loop: read local fd → write to remote, poll remote → write to local */
+    {
+        char buf[65536];
+        char rpath[256], wpath[256];
+        snprintf(rpath, sizeof(rpath), "/%s/shell/functions/read", c->target);
+        snprintf(wpath, sizeof(wpath), "/%s/shell/functions/write", c->target);
+
+        while (1) {
+            /* Check for input from CLI client (non-blocking) */
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(lfd, &rfds);
+            struct timeval tv = {0, 50000}; /* 50ms = 20Hz poll */
+            int sel = select(lfd + 1, &rfds, NULL, NULL, &tv);
+
+            if (sel < 0 && errno == EINTR) continue;
+            if (sel < 0) break;
+
+            /* Client input → remote PTY write */
+            if (sel > 0 && FD_ISSET(lfd, &rfds)) {
+                ssize_t n = read(lfd, buf, sizeof(buf));
+                if (n <= 0) break; /* client disconnected */
+
+                portal_msg_t *wm = portal_msg_alloc();
+                portal_resp_t *wr = portal_resp_alloc();
+                if (wm && wr) {
+                    portal_msg_set_path(wm, wpath);
+                    portal_msg_set_method(wm, PORTAL_METHOD_CALL);
+                    portal_msg_add_header(wm, "session", session_id);
+                    portal_msg_set_body(wm, buf, (size_t)n);
+                    if (!wm->ctx) wm->ctx = calloc(1, sizeof(portal_ctx_t));
+                    if (wm->ctx) { wm->ctx->auth.user = strdup("root"); wm->ctx->auth.token = strdup("__federation__"); portal_labels_add(&wm->ctx->auth.labels, "root"); }
+                    g_core->send(g_core, wm, wr);
+                    portal_msg_free(wm); portal_resp_free(wr);
+                }
+            }
+
+            /* Remote PTY read → client output */
+            {
+                portal_msg_t *rm = portal_msg_alloc();
+                portal_resp_t *rr = portal_resp_alloc();
+                if (rm && rr) {
+                    portal_msg_set_path(rm, rpath);
+                    portal_msg_set_method(rm, PORTAL_METHOD_CALL);
+                    portal_msg_add_header(rm, "session", session_id);
+                    if (!rm->ctx) rm->ctx = calloc(1, sizeof(portal_ctx_t));
+                    if (rm->ctx) { rm->ctx->auth.user = strdup("root"); rm->ctx->auth.token = strdup("__federation__"); portal_labels_add(&rm->ctx->auth.labels, "root"); }
+                    g_core->send(g_core, rm, rr);
+
+                    if (rr->status == PORTAL_NOT_FOUND) {
+                        /* Session ended on remote side */
+                        portal_msg_free(rm); portal_resp_free(rr);
+                        break;
+                    }
+                    if (rr->body && rr->body_len > 0) {
+                        ssize_t w = send(lfd, rr->body, rr->body_len, MSG_NOSIGNAL);
+                        if (w < 0) { portal_msg_free(rm); portal_resp_free(rr); break; }
+                    }
+                    portal_msg_free(rm); portal_resp_free(rr);
+                }
+            }
+        }
+    }
+
+    /* 3. Close remote session */
+    {
+        char cpath[256];
+        snprintf(cpath, sizeof(cpath), "/%s/shell/functions/close", c->target);
+        portal_msg_t *cm = portal_msg_alloc();
+        portal_resp_t *cr = portal_resp_alloc();
+        if (cm && cr) {
+            portal_msg_set_path(cm, cpath);
+            portal_msg_set_method(cm, PORTAL_METHOD_CALL);
+            portal_msg_add_header(cm, "session", session_id);
+            if (!cm->ctx) cm->ctx = calloc(1, sizeof(portal_ctx_t));
+            if (cm->ctx) { cm->ctx->auth.user = strdup("root"); cm->ctx->auth.token = strdup("__federation__"); portal_labels_add(&cm->ctx->auth.labels, "root"); }
+            g_core->send(g_core, cm, cr);
+            portal_msg_free(cm); portal_resp_free(cr);
+        }
+    }
+
+    g_core->log(g_core, PORTAL_LOG_INFO, "node",
+                "Shell indirect relay closed (peer '%s')", c->target);
+    close(lfd);
+    free(c);
+    return NULL;
+
+indirect_fail:
+    close(lfd);
     free(c);
     return NULL;
 }
@@ -3975,30 +4126,43 @@ int portal_module_handle(portal_core_t *core, const portal_msg_t *msg,
             return -1;
         }
 
-        /* Acquire worker on main thread (fd_del must run on ev loop thread) */
-        worker_t *w = get_worker(peer);
-        if (!w || w->fd < 0) {
-            portal_resp_set_status(resp, PORTAL_UNAVAILABLE);
-            return -1;
-        }
-
         /* Create socketpair: sp[0] = background thread side, sp[1] = caller side */
         int sp[2];
         if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0) {
-            release_worker(peer, w);
             portal_resp_set_status(resp, PORTAL_INTERNAL_ERROR);
             return -1;
         }
 
         shell_connect_ctx_t *ctx = calloc(1, sizeof(*ctx));
         ctx->local_fd = sp[0];
-        ctx->peer = peer;
-        ctx->worker = w;
         ctx->rows = atoi(rows_str);
         ctx->cols = atoi(cols_str);
+        snprintf(ctx->target, sizeof(ctx->target), "%s", peer_name);
+        ctx->indirect = peer->is_indirect;
+
+        if (peer->is_indirect) {
+            /* Indirect peers: can't do raw fd relay through hub.
+             * Use message-based relay via g_core->send() in a thread. */
+            ctx->peer = NULL;
+            ctx->worker = NULL;
+        } else {
+            /* Direct peers: raw fd relay through worker */
+            ctx->peer = peer;
+            worker_t *w = get_worker(peer);
+            if (!w || w->fd < 0) {
+                close(sp[0]); close(sp[1]);
+                free(ctx);
+                portal_resp_set_status(resp, PORTAL_UNAVAILABLE);
+                return -1;
+            }
+            ctx->worker = w;
+        }
 
         pthread_t th;
-        pthread_create(&th, NULL, shell_connect_thread, ctx);
+        if (peer->is_indirect)
+            pthread_create(&th, NULL, shell_indirect_thread, ctx);
+        else
+            pthread_create(&th, NULL, shell_connect_thread, ctx);
         pthread_detach(th);
 
         /* Return sp[1] to caller — immediately, no blocking */
