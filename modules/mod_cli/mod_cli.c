@@ -2793,7 +2793,11 @@ parse_results:
             memcpy(name, s, (size_t)n);
             name[n] = '\0';
 
-            int dir = (s[n] == '/');
+            /* Check for '/' indicator after optional spaces */
+            int dir = 0;
+            int k = n;
+            while (s[k] == ' ') k++;
+            if (s[k] == '/') dir = 1;
 
             /* Filter by partial */
             if (partial_len == 0 || strncmp(name, partial, partial_len) == 0) {
