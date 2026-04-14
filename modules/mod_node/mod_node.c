@@ -205,6 +205,13 @@ static node_peer_t   **g_peers = NULL;
 static int             g_peers_cap = 0;
 static int             g_peer_count = 0;
 
+/* Outbound gating: if g_defer_event is set, mod_node does not initiate
+ * outbound connects until that event fires. Lets another module (e.g.
+ * mod_ssip) delay federation until device identity is ready — avoids
+ * pre-registration handshake timeouts on the hub. */
+static char            g_defer_event[256] = "";
+static int             g_outbound_enabled = 1;
+
 /* Ensure the pointer array has room for at least `min_cap` entries.
  * Returns 0 on success, -1 on allocation failure. */
 static int peers_ensure_capacity(int min_cap)
@@ -1015,6 +1022,7 @@ static void on_inbound_data(int fd, uint32_t events, void *userdata);
 static int peer_in_whitelist(const char *name);
 static void mark_peer_dead_by_fd(int fd);
 static void reconnect_dead_peers(void);
+static void connect_configured_peers(void);
 
 /* --- Peer registry: direct + indirect (hub-proxied) --- */
 
@@ -1799,6 +1807,9 @@ static void finalize_handshake(rx_state_t *rx)
         for (int j = 0; j < existing->worker_count; j++) {
             int wfd = existing->workers[j].fd;
             if (wfd < 0) continue;
+            /* Never touch the fd we're currently finalizing — the OS may
+             * have reused the same fd number after a prior close. */
+            if (wfd == client_fd) continue;
             char wkey[16];
             snprintf(wkey, sizeof(wkey), "%d", wfd);
             rx_state_t *wrx = portal_ht_get(&g_rx_by_fd, wkey);
@@ -1840,6 +1851,11 @@ static void finalize_handshake(rx_state_t *rx)
 #endif
         }
         pthread_mutex_unlock(&existing->lock);
+        /* Log before freeing hs — peer_name lives inside hs */
+        g_core->log(g_core, PORTAL_LOG_DEBUG, "node",
+                    "Worker connection from '%s' (%d/%d)%s",
+                    hs->peer_name, existing->worker_count,
+                    NODE_MAX_THREADS, tls_tag);
         /* Transition fd to READY; keep the rx_state_t registered. The
          * old blocking flow called node_fd_add_with_rx here; we already
          * have the fd in the event loop via node_fd_add_inbound_handshake,
@@ -1847,10 +1863,6 @@ static void finalize_handshake(rx_state_t *rx)
         hs_context_free(rx->hs);
         rx->hs = NULL;
         conn_set_state(rx, CONN_STATE_READY);
-        g_core->log(g_core, PORTAL_LOG_DEBUG, "node",
-                    "Worker connection from '%s' (%d/%d)%s",
-                    hs->peer_name, existing->worker_count,
-                    NODE_MAX_THREADS, tls_tag);
         return;
     }
 
@@ -2740,10 +2752,25 @@ static void tls_renew_timer_cb(void *userdata)
 }
 #endif
 
+/* Called when the configured defer-event fires: unblocks outbound
+ * connects and runs one immediate attempt instead of waiting for the
+ * next reconnect timer tick. */
+static void on_defer_event_fired(const portal_msg_t *msg, void *userdata)
+{
+    (void)msg; (void)userdata;
+    if (g_outbound_enabled) return;
+    g_outbound_enabled = 1;
+    if (g_core)
+        g_core->log(g_core, PORTAL_LOG_INFO, "node",
+                    "Outbound gating released by event '%s'", g_defer_event);
+    connect_configured_peers();
+}
+
 /* Retry configured peers that aren't connected */
 static void connect_configured_peers(void)
 {
     if (!g_core) return;
+    if (!g_outbound_enabled) return;
     for (int i = 0; i < NODE_MAX_PEERS; i++) {
         char key[32];
         snprintf(key, sizeof(key), "peer%d", i);
@@ -3403,17 +3430,32 @@ int portal_module_load(portal_core_t *core)
     for (int i = 0; node_cli_cmds[i].words; i++)
         portal_cli_register(core, &node_cli_cmds[i], "node");
 
-    /* Connect to configured peers */
-    for (int i = 0; i < NODE_MAX_PEERS; i++) {
-        char key[32];
-        snprintf(key, sizeof(key), "peer%d", i);
-        const char *val = core->config_get(core, "nodes", key);
-        if (!val) continue;
+    /* Outbound gating: if defer_outbound_until is set, skip the initial
+     * connect and wait for the event. The reconnect timer also honors
+     * g_outbound_enabled, so nothing will connect out until the event
+     * fires (or the flag is flipped manually). */
+    const char *defer = core->config_get(core, "node", "defer_outbound_until");
+    if (defer && defer[0]) {
+        snprintf(g_defer_event, sizeof(g_defer_event), "%s", defer);
+        g_outbound_enabled = 0;
+        core->subscribe(core, g_defer_event, on_defer_event_fired, NULL);
+        core->log(core, PORTAL_LOG_INFO, "node",
+                  "Outbound connects deferred until event '%s'", g_defer_event);
+    }
 
-        char pname[64] = {0}, phost[256] = {0};
-        int pport = NODE_DEFAULT_PORT;
-        if (sscanf(val, "%63[^=]=%255[^:]:%d", pname, phost, &pport) >= 2)
-            connect_to_peer_async(pname, phost, pport);
+    /* Connect to configured peers */
+    if (g_outbound_enabled) {
+        for (int i = 0; i < NODE_MAX_PEERS; i++) {
+            char key[32];
+            snprintf(key, sizeof(key), "peer%d", i);
+            const char *val = core->config_get(core, "nodes", key);
+            if (!val) continue;
+
+            char pname[64] = {0}, phost[256] = {0};
+            int pport = NODE_DEFAULT_PORT;
+            if (sscanf(val, "%63[^=]=%255[^:]:%d", pname, phost, &pport) >= 2)
+                connect_to_peer_async(pname, phost, pport);
+        }
     }
 
     return PORTAL_MODULE_OK;

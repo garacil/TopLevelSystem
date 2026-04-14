@@ -57,7 +57,6 @@ CORE_SRCS   = $(CORE_DIR)/core_log.c \
               $(CORE_DIR)/core_module.c \
               $(CORE_DIR)/core_message.c \
               $(CORE_DIR)/core_auth.c \
-              $(CORE_DIR)/core_pubsub.c \
               $(CORE_DIR)/core_wire.c \
               $(CORE_DIR)/core_events.c \
               $(CORE_DIR)/core_store.c \
@@ -128,7 +127,6 @@ MOD_WATCHDOG = $(MOD_DIR)/mod_watchdog.so
 TEST_PATH    = $(BUILD_DIR)/test_path
 TEST_ACL     = $(BUILD_DIR)/test_acl
 TEST_HT      = $(BUILD_DIR)/test_hashtable
-TEST_PUBSUB  = $(BUILD_DIR)/test_pubsub
 TEST_WIRE    = $(BUILD_DIR)/test_wire
 TEST_EVENTS  = $(BUILD_DIR)/test_events
 TEST_EVLOOP  = $(BUILD_DIR)/test_eventloop
@@ -419,7 +417,7 @@ $(PORTALCTL): $(TOOLS_DIR)/portalctl.c
 
 # --- Tests ---
 
-tests: $(TEST_PATH) $(TEST_ACL) $(TEST_HT) $(TEST_PUBSUB) $(TEST_WIRE) $(TEST_EVENTS) $(TEST_EVLOOP) $(TEST_CRYPTO) $(TEST_VALID)
+tests: $(TEST_PATH) $(TEST_ACL) $(TEST_HT) $(TEST_WIRE) $(TEST_EVENTS) $(TEST_EVLOOP) $(TEST_CRYPTO) $(TEST_VALID)
 	@echo ""
 	@echo "Running tests..."
 	@echo "================"
@@ -428,8 +426,6 @@ tests: $(TEST_PATH) $(TEST_ACL) $(TEST_HT) $(TEST_PUBSUB) $(TEST_WIRE) $(TEST_EV
 	@$(TEST_ACL)
 	@echo ""
 	@$(TEST_HT)
-	@echo ""
-	@$(TEST_PUBSUB)
 	@echo ""
 	@$(TEST_WIRE)
 	@echo ""
@@ -476,15 +472,15 @@ $(TEST_HT): $(TESTS_DIR)/test_hashtable.c $(CORE_DIR)/core_hashtable.c
 	@echo "  CC    $@"
 	@$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_PUBSUB): $(TESTS_DIR)/test_pubsub.c $(CORE_DIR)/core_pubsub.c $(CORE_DIR)/core_log.c
-	@mkdir -p $(BUILD_DIR)
-	@echo "  CC    $@"
-	@$(CC) $(CFLAGS) -o $@ $^
-
 $(TEST_WIRE): $(TESTS_DIR)/test_wire.c $(CORE_DIR)/core_wire.c $(CORE_DIR)/core_message.c
 	@mkdir -p $(BUILD_DIR)
 	@echo "  CC    $@"
 	@$(CC) $(CFLAGS) -o $@ $^
+
+# --- Debug build (with -g, no optimization) ---
+
+debug: CFLAGS += -g -O0
+debug: all
 
 # --- Clean ---
 

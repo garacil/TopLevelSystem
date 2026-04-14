@@ -103,6 +103,24 @@ portal_event_def_t *portal_events_find(portal_event_registry_t *reg,
     return NULL;
 }
 
+/* --- Pattern matching (pubsub-style) --- */
+
+/* Pattern semantics:
+ *   "/events/login"  matches exactly "/events/login"
+ *   "/events/ *"     matches any path starting with "/events/"
+ *   "*"              matches everything
+ */
+static int pattern_matches(const char *pattern, const char *path)
+{
+    if (!pattern || !path) return 0;
+    size_t plen = strlen(pattern);
+    if (plen >= 2 && pattern[plen - 1] == '*' && pattern[plen - 2] == '/')
+        return strncmp(pattern, path, plen - 1) == 0;
+    if (strcmp(pattern, "*") == 0)
+        return 1;
+    return strcmp(pattern, path) == 0;
+}
+
 /* --- Subscriptions --- */
 
 static int check_acl(const portal_event_def_t *def,
@@ -234,7 +252,76 @@ int portal_events_unsubscribe_all(portal_event_registry_t *reg,
     return count;
 }
 
-/* --- Emit --- */
+int portal_events_subscribe_pattern(portal_event_registry_t *reg,
+                                     const char *pattern,
+                                     const char *subscriber,
+                                     const portal_labels_t *subscriber_labels,
+                                     portal_event_fn handler, void *userdata)
+{
+    if (!reg || !pattern || !handler) return -1;
+
+    /* Duplicate check by (pattern, handler) — same semantics as pubsub */
+    for (int i = 0; i < reg->sub_count; i++) {
+        if (reg->subs[i].active &&
+            reg->subs[i].handler == handler &&
+            strcmp(reg->subs[i].event_path, pattern) == 0)
+            return 0;  /* already subscribed */
+    }
+
+    /* Try reusing an inactive slot first */
+    portal_sub_t *sub = NULL;
+    for (int i = 0; i < reg->sub_count; i++) {
+        if (!reg->subs[i].active) { sub = &reg->subs[i]; break; }
+    }
+    if (!sub) {
+        if (reg->sub_count >= EVENT_MAX_SUBS) return -1;
+        sub = &reg->subs[reg->sub_count++];
+    }
+
+    memset(sub, 0, sizeof(*sub));
+    snprintf(sub->event_path, sizeof(sub->event_path), "%s", pattern);
+    snprintf(sub->subscriber, sizeof(sub->subscriber), "%s",
+             subscriber ? subscriber : "module");
+    if (subscriber_labels) {
+        memcpy(&sub->subscriber_labels, subscriber_labels, sizeof(portal_labels_t));
+    } else {
+        /* Internal trusted subscriber — default to {"root"} for ACL purposes */
+        portal_labels_add(&sub->subscriber_labels, "root");
+    }
+    sub->handler = handler;
+    sub->userdata = userdata;
+    sub->notify_fd = -1;
+    sub->active = 1;
+
+    LOG_DEBUG("events", "Subscribed pattern '%s' (subscriber=%s)",
+              pattern, sub->subscriber);
+    return 0;
+}
+
+int portal_events_unsubscribe_handler(portal_event_registry_t *reg,
+                                       const char *pattern,
+                                       portal_event_fn handler)
+{
+    if (!reg || !pattern || !handler) return -1;
+    for (int i = 0; i < reg->sub_count; i++) {
+        if (reg->subs[i].active &&
+            reg->subs[i].handler == handler &&
+            strcmp(reg->subs[i].event_path, pattern) == 0) {
+            reg->subs[i].active = 0;
+            LOG_DEBUG("events", "Unsubscribed pattern '%s'", pattern);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* --- Emit ---
+ *
+ * Unified delivery: iterates all subs, matches by pattern (supports
+ * exact, "/prefix/ *" and "*"), and enforces ACL at emit-time using the
+ * event's registered labels. Events not declared via event_register are
+ * only delivered to subscribers carrying the "root" label (safe default).
+ */
 
 int portal_events_emit(portal_event_registry_t *reg,
                         const char *event_path,
@@ -242,17 +329,38 @@ int portal_events_emit(portal_event_registry_t *reg,
 {
     int delivered = 0;
 
-    /* Build a message for callbacks */
+    /* Look up the event definition once — NULL if event is not registered */
+    portal_event_def_t *def = portal_events_find(reg, event_path);
+
+    /* Build a message for callbacks. msg.ctx is a stack-allocated minimal
+     * context so handlers can safely deref msg->ctx->auth without segfault. */
+    portal_ctx_t ctx = {0};
+    ctx.auth.user = (char *)"__system__";
+    portal_labels_add(&ctx.auth.labels, "root");
+
     portal_msg_t msg = {0};
     msg.path = (char *)event_path;
     msg.method = PORTAL_METHOD_EVENT;
     msg.body = (void *)data;
     msg.body_len = data_len;
+    msg.ctx = &ctx;
 
     for (int i = 0; i < reg->sub_count; i++) {
         portal_sub_t *sub = &reg->subs[i];
         if (!sub->active) continue;
-        if (strcmp(sub->event_path, event_path) != 0) continue;
+        if (!pattern_matches(sub->event_path, event_path)) continue;
+
+        /* ACL enforcement at emit-time:
+         *   - If event is registered and has labels, subscriber must match.
+         *   - If event is not registered, only deliver to subscribers
+         *     carrying "root" (safe default — prevents eavesdropping on
+         *     events the emitter has not declared with explicit labels).
+         */
+        if (def) {
+            if (!check_acl(def, &sub->subscriber_labels)) continue;
+        } else {
+            if (!portal_labels_has(&sub->subscriber_labels, "root")) continue;
+        }
 
         if (sub->handler) {
             /* Internal module callback */

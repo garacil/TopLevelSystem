@@ -78,12 +78,30 @@ int  portal_events_unregister_module(portal_event_registry_t *reg,
 portal_event_def_t *portal_events_find(portal_event_registry_t *reg,
                                         const char *path);
 
-/* Subscribe: internal module (handler callback) */
+/* Subscribe: internal module (handler callback, exact-path match).
+ * Requires the event to be registered; applies ACL at subscribe time. */
 int  portal_events_subscribe(portal_event_registry_t *reg,
                               const char *event_path,
                               const char *subscriber,
                               const portal_labels_t *subscriber_labels,
                               portal_event_fn handler, void *userdata);
+
+/* Subscribe by pattern: supports "/foo/ *" suffix, "*" global, or exact.
+ * Does NOT require the event to be pre-registered (for consumers like
+ * mod_audit that listen to "/events/ *"). ACL is enforced at emit-time:
+ * if the matched event has labels, subscriber_labels must intersect.
+ * subscriber_labels == NULL is treated as {"root"} (trusted internal). */
+int  portal_events_subscribe_pattern(portal_event_registry_t *reg,
+                                      const char *pattern,
+                                      const char *subscriber,
+                                      const portal_labels_t *subscriber_labels,
+                                      portal_event_fn handler, void *userdata);
+
+/* Unsubscribe by (pattern, handler) tuple — matches what api_unsubscribe
+ * needs after subscribe_pattern. Returns 0 if one entry was removed. */
+int  portal_events_unsubscribe_handler(portal_event_registry_t *reg,
+                                        const char *pattern,
+                                        portal_event_fn handler);
 
 /* Subscribe: external client (fd notification) */
 int  portal_events_subscribe_fd(portal_event_registry_t *reg,

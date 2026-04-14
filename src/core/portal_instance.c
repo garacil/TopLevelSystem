@@ -36,7 +36,6 @@
 #include "core_log.h"
 #include "core_message.h"
 #include "core_handlers.h"
-#include "core_pubsub.h"
 
 /* --- Crash isolation --- */
 
@@ -144,9 +143,10 @@ static int api_send(portal_core_t *core, portal_msg_t *msg, portal_resp_t *resp)
     if (inst->trace_count > 0 && msg->path)
         trace_message(inst, msg, NULL);
 
-    /* Publish to subscribers if EVENT method */
+    /* EVENT method: fan out via unified events registry */
     if (msg->method == PORTAL_METHOD_EVENT)
-        portal_pubsub_publish(&inst->pubsub, msg);
+        portal_events_emit(&inst->events_reg, msg->path,
+                           msg->body, msg->body_len);
 
     const char *mod_name = portal_path_lookup(&inst->paths, msg->path);
 
@@ -256,14 +256,20 @@ static int api_subscribe(portal_core_t *core, const char *path_pattern,
                           portal_event_fn handler, void *userdata)
 {
     portal_instance_t *inst = core->_internal;
-    return portal_pubsub_subscribe(&inst->pubsub, path_pattern, handler, userdata);
+    /* Unified: route through events_reg with wildcard-pattern semantics.
+     * Internal module subscribers get trusted-by-default ACL (labels=NULL
+     * → {root}). External clients should use portal_events_subscribe_fd. */
+    return portal_events_subscribe_pattern(&inst->events_reg, path_pattern,
+                                            "module", NULL,
+                                            handler, userdata);
 }
 
 static int api_unsubscribe(portal_core_t *core, const char *path_pattern,
                             portal_event_fn handler)
 {
     portal_instance_t *inst = core->_internal;
-    return portal_pubsub_unsubscribe(&inst->pubsub, path_pattern, handler);
+    return portal_events_unsubscribe_handler(&inst->events_reg,
+                                              path_pattern, handler);
 }
 
 static int api_module_loaded(portal_core_t *core, const char *name)
@@ -340,6 +346,8 @@ static int api_event_emit(portal_core_t *core, const char *event_path,
                            const void *data, size_t data_len)
 {
     portal_instance_t *inst = core->_internal;
+    /* Unified delivery: events_reg handles both declared subscribers
+     * (event_subscribe) and pattern subscribers (core->subscribe). */
     return portal_events_emit(&inst->events_reg, event_path, data, data_len);
 }
 
@@ -789,7 +797,6 @@ int portal_instance_init(portal_instance_t *inst)
     memset(inst, 0, sizeof(*inst));
     portal_config_defaults(&inst->config);
     portal_path_init(&inst->paths);
-    portal_pubsub_init(&inst->pubsub);
     portal_events_init(&inst->events_reg);
     portal_storage_init(&inst->storage);
 
@@ -805,7 +812,6 @@ void portal_instance_destroy(portal_instance_t *inst)
 {
     portal_module_registry_destroy(&inst->modules, &inst->api);
     portal_path_destroy(&inst->paths);
-    portal_pubsub_destroy(&inst->pubsub);
     portal_events_destroy(&inst->events_reg);
     portal_event_destroy(&inst->events);
     portal_config_destroy(&inst->config);

@@ -28,7 +28,6 @@
 #include "core_module.h"
 #include "core_event.h"
 #include "core_auth.h"
-#include "core_pubsub.h"
 #include "core_events.h"
 #include "core_store.h"
 
@@ -67,7 +66,6 @@ typedef struct {
     portal_module_registry_t modules;
     portal_event_loop_t      events;
     portal_auth_registry_t   auth;
-    portal_pubsub_t          pubsub;
     portal_event_registry_t  events_reg;
     portal_store_t           store;
     portal_storage_registry_t storage;  /* multi-provider registry */
