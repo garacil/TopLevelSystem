@@ -88,7 +88,7 @@ extern int32_t portal_wire_read_length(const uint8_t *buf);
 
 #define NODE_MAX_PEERS        16384  /* sanity cap; peers are heap-allocated individually */
 #define NODE_MAX_THREADS      16
-#define NODE_BUF_SIZE         65536
+#define NODE_BUF_SIZE         (1 * 1024 * 1024)
 #define NODE_DEFAULT_PORT     9700
 #define NODE_DEFAULT_THREADS  4
 #define NODE_HANDSHAKE_MAGIC  "PORTAL02"

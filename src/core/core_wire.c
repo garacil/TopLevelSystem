@@ -117,40 +117,70 @@ int portal_wire_decode_msg(const uint8_t *buf, size_t len, portal_msg_t *msg)
 {
     if (len < 4) return -1;
     const uint8_t *p = buf;
+    const uint8_t *end = buf + len;
 
+    /* Bounds-checked readers: return error if we'd read past the buffer */
+#define WIRE_CHECK(need) do { if (p + (need) > end) return -1; } while(0)
+
+    WIRE_CHECK(4);
     (void)read_u32(&p);  /* total_length — already known */
+    WIRE_CHECK(8);
     msg->id = read_u64(&p);
+    WIRE_CHECK(1);
     msg->method = read_u8(&p);
+    WIRE_CHECK(2);
+    {   uint16_t slen = ((uint16_t)p[0] << 8) | p[1];
+        WIRE_CHECK(2 + slen);
+    }
     msg->path = read_str(&p);
+    WIRE_CHECK(2);
     msg->header_count = read_u16(&p);
 
+    if (msg->header_count > PORTAL_MAX_HEADERS) return -1;
     if (msg->header_count > 0) {
         msg->headers = calloc(msg->header_count, sizeof(portal_header_t));
         for (uint16_t i = 0; i < msg->header_count; i++) {
+            WIRE_CHECK(2);
+            { uint16_t kl = ((uint16_t)p[0] << 8) | p[1]; WIRE_CHECK(2 + kl); }
             msg->headers[i].key = read_str(&p);
+            WIRE_CHECK(2);
+            { uint16_t vl = ((uint16_t)p[0] << 8) | p[1]; WIRE_CHECK(2 + vl); }
             msg->headers[i].value = read_str(&p);
         }
     }
 
+    WIRE_CHECK(4);
     uint32_t body_len = read_u32(&p);
     if (body_len > 0) {
+        WIRE_CHECK(body_len);
         msg->body = malloc(body_len);
+        if (!msg->body) return -1;
         memcpy(msg->body, p, body_len);
         msg->body_len = body_len;
         p += body_len;
     }
 
+    WIRE_CHECK(1);
     uint8_t has_ctx = read_u8(&p);
     if (has_ctx) {
         msg->ctx = calloc(1, sizeof(portal_ctx_t));
+        WIRE_CHECK(2);
+        { uint16_t ul = ((uint16_t)p[0] << 8) | p[1]; WIRE_CHECK(2 + ul); }
         msg->ctx->auth.user = read_str(&p);
+        WIRE_CHECK(2);
+        { uint16_t tl = ((uint16_t)p[0] << 8) | p[1]; WIRE_CHECK(2 + tl); }
         msg->ctx->auth.token = read_str(&p);
+        WIRE_CHECK(8 + 8 + 8 + 2);
         msg->ctx->trace.trace_id = read_u64(&p);
         msg->ctx->trace.parent_id = read_u64(&p);
         msg->ctx->trace.timestamp_us = read_u64(&p);
         msg->ctx->trace.hops = read_u16(&p);
+        WIRE_CHECK(2);
         uint16_t label_count = read_u16(&p);
+        if (label_count > PORTAL_MAX_LABELS) label_count = PORTAL_MAX_LABELS;
         for (uint16_t i = 0; i < label_count; i++) {
+            WIRE_CHECK(2);
+            { uint16_t ll = ((uint16_t)p[0] << 8) | p[1]; WIRE_CHECK(2 + ll); }
             char *label = read_str(&p);
             if (label) {
                 portal_labels_add(&msg->ctx->auth.labels, label);
@@ -159,6 +189,7 @@ int portal_wire_decode_msg(const uint8_t *buf, size_t len, portal_msg_t *msg)
         }
     }
 
+#undef WIRE_CHECK
     return 0;
 }
 
@@ -196,26 +227,40 @@ int portal_wire_decode_resp(const uint8_t *buf, size_t len, portal_resp_t *resp)
 {
     if (len < 4) return -1;
     const uint8_t *p = buf;
+    const uint8_t *end = buf + len;
 
+#define WIRE_CHECK(need) do { if (p + (need) > end) return -1; } while(0)
+
+    WIRE_CHECK(4);
     (void)read_u32(&p);
+    WIRE_CHECK(2 + 2);
     resp->status = read_u16(&p);
     resp->header_count = read_u16(&p);
 
+    if (resp->header_count > PORTAL_MAX_HEADERS) return -1;
     if (resp->header_count > 0) {
         resp->headers = calloc(resp->header_count, sizeof(portal_header_t));
         for (uint16_t i = 0; i < resp->header_count; i++) {
+            WIRE_CHECK(2);
+            { uint16_t kl = ((uint16_t)p[0] << 8) | p[1]; WIRE_CHECK(2 + kl); }
             resp->headers[i].key = read_str(&p);
+            WIRE_CHECK(2);
+            { uint16_t vl = ((uint16_t)p[0] << 8) | p[1]; WIRE_CHECK(2 + vl); }
             resp->headers[i].value = read_str(&p);
         }
     }
 
+    WIRE_CHECK(4);
     uint32_t body_len = read_u32(&p);
     if (body_len > 0) {
+        WIRE_CHECK(body_len);
         resp->body = malloc(body_len);
+        if (!resp->body) return -1;
         memcpy(resp->body, p, body_len);
         resp->body_len = body_len;
     }
 
+#undef WIRE_CHECK
     return 0;
 }
 
