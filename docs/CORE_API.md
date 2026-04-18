@@ -791,59 +791,116 @@ The `.words` field uses space-separated word patterns. The `args` parameter in t
 
 ## 14. Remote Shell
 
-Portal provides SSH-like interactive terminal access to any federated peer via dedicated relay threads.
+Portal provides SSH-like interactive terminal access to any federated peer through a dedicated **dial-back shell channel** that never touches the federation worker pool.
 
 ### Architecture
 
-Two mechanisms serve different use cases:
+Three coexisting shell subsystems, each solving a different problem:
 
-- **mod_shell** (`/shell/functions/*`) — HTTP/session-based PTY access for web clients and automation
-- **mod_node** (`/node/functions/shell`) — direct fd relay for CLI interactive shells (zero event loop blocking)
+- **Dial-back channel** (`mod_shell`, `/shell/functions/{open_remote, dialback_request}`) — the canonical interactive shell. Federation carries only a one-shot signal; all shell data flows over a separate TCP+TLS connection that the **target device opens back to the initiator**. `/bin/su -l <user>` runs on the target after a privilege drop, so PAM (`pam_unix` against `/etc/shadow`) enforces the password. CLI `shell <peer>` uses this path.
+- **Local shell** (`mod_cli`) — for `shell` with no peer. `mod_cli` `forkpty()`s directly and relays on a dedicated pthread. No federation involved.
+- **Legacy message-based PTY** (`mod_shell`, `/shell/functions/{open, read, write, close, resize, exec}`) — HTTP-driven PTY sessions for scripts and automation that can't hold an interactive TCP connection. Kept for non-interactive use.
 
-The CLI `shell` command uses mod_node for both local and remote shells. Each session gets a **dedicated thread** that relays raw bytes between the CLI client and the PTY — the event loop is never involved in shell I/O.
+The event loop is **never** involved in shell I/O — every byte flows through a dedicated pthread, and the dial-back path never consumes pool workers.
 
-### Stateless Execution (mod_shell)
-
-```
-GET /shell/functions/exec?cmd=uptime
-```
-
-Executes a single command via `popen()`. Returns stdout+stderr as body.
-
-### Interactive PTY Sessions (mod_shell — for HTTP/API clients)
+### Dial-back shell channel
 
 ```
-PUT /shell/functions/open?rows=24&cols=80  → session_id
-PUT /shell/functions/write?session=<id>    (body: raw bytes)
-PUT /shell/functions/read?session=<id>     → available output
-PUT /shell/functions/close?session=<id>    ��� closed
-PUT /shell/functions/resize?session=<id>&rows=40&cols=120
+INITIATOR (Portal running the CLI)           TARGET (remote peer)
+──────────────────────────────────────────────────────────────────
+/shell/functions/open_remote  {peer}
+  1. gen 32-byte random session_id          /shell/functions/dialback_request
+  2. register pending entry                    { session_id, reply_host, reply_port }
+  3. send dialback_request    ───federation──▶   4. spawn pthread (dialback_thread)
+     via ctrl_fd (one small signal)               │
+  4. wait on condvar                              │ 5. connect(reply_host:reply_port)
+     (shell_dial_timeout seconds)                 │ 6. SSL_connect
+                                                  │ 7. SSL_write session_id + '\n'
+  8. listener_thread accept()  ◀────TLS──────────┘
+  9. accept_handler_thread:
+     • SSL_accept
+     • read session_id line
+     • pending_take(id) → match pending entry
+     • socketpair(plain, tls_bridge)
+     • hand plain side to waiter
+     • run tls_plain_relay on its own pthread
+                                                   10. forkpty + child:
+ 11. open_remote returns plain fd to CLI               • print "<host> login: "
+                                                       • read username
+ CLI relays user terminal ↔ plain fd                   • drop privileges to nobody
+                                                       • execl /bin/su -l <user>
+                                                          └─ PAM auth, then
+                                                             user's login shell
+                                                    12. tls_plain_relay:
+                                                          PTY master ↔ TLS fd
+                                                          (its own pthread)
+
+   Either side closes → both pthreads exit cleanly
+   session_id is one-shot; unmatched requests time out
 ```
 
-PTY sessions use `forkpty()` with `TERM=xterm-256color`. Interactive programs (htop, vi, top, less, sudo) work correctly.
-
-### CLI Shell Mode (mod_cli + mod_node — dedicated threads)
-
-```
-portal:/> shell              # Local: forkpty() + relay thread
-portal:/> shell <peer>       # Remote: /node/functions/shell + relay thread
-Connected to <peer> (Ctrl-] to disconnect)
-root@remote:~# htop
-```
-
-**Local shell**: mod_cli forks a PTY directly and spawns a relay thread (PTY output → client fd). Keystrokes go raw to the PTY master fd.
-
-**Remote shell**: mod_node's `/node/functions/shell` acquires a federation worker, sends `/tunnel/shell` to the remote peer (which forks a PTY there), then relays raw bytes between a socketpair and the federation worker fd — all in a background thread. The event loop returns immediately.
-
-Ctrl-] disconnects. Works bidirectionally between any federated peers.
-
-### Federation Shell Path
-
-| Path | Description |
-|------|-------------|
-| `/node/functions/shell` | Open PTY on remote peer. Headers: peer, rows, cols. Returns fd. |
-| `/tunnel/shell` | Internal: remote side forks PTY and relays on worker fd. |
+| Path | Caller | Notes |
+|---|---|---|
+| `/shell/functions/open_remote` | CLI (locally via `shell <peer>`) | Headers: `peer`, `rows`, `cols`, `timeout`. Returns the plain-side bridge fd as the response body. Blocks up to `shell_dial_timeout` waiting for the dial-back. |
+| `/shell/functions/dialback_request` | Remote initiator via federation | Headers: `session_id`, `reply_host`, `reply_port`, `rows`, `cols`. Returns 200 immediately; the dial happens in a background pthread. |
 
 ### Security
 
-All shell paths require a configurable access label (default: `root`). Every execution emits `/events/shell/exec` for audit.
+The target-side PTY child:
+
+1. Prompts for a username (alphanumeric + `._-`, 32-char cap).
+2. **Drops privileges** via `setgroups(0, NULL)`, `setgid(nobody)`, `setuid(nobody)`.
+3. Closes inherited fds ≥ 3.
+4. `execl("/bin/su", "su", "-l", user, NULL)`.
+
+The privilege drop is critical. `/bin/su` is SUID root; when called from root (which Portal is), PAM's `pam_rootok` lets `su` skip password auth — a user typing any valid name + Enter would land in that user's shell unauthenticated. Running as `nobody` strips that exemption, so `su` goes through the full PAM auth stack (`pam_unix` → `/etc/shadow`). If the privilege drop fails, the login aborts (we never exec `su` as root).
+
+TLS:
+- OpenSSL ≥ TLS 1.2, uses the instance's federation cert by default (`shell_tls_cert`/`shell_tls_key` override).
+- Peer cert verification off; authenticity comes from the 32-byte random `session_id` sent as the first line after the TLS handshake. One-shot, times out if no dial-back arrives.
+
+The target never needs to accept inbound connections — it dials back to the initiator. NAT'd devices work natively; only the initiator needs an open firewall rule for `shell_port` (default `2223`).
+
+`/bin/login` is **not** used. util-linux 2.40+ rejects `forkpty()`-allocated PTYs with `FATAL: bad tty`. `/bin/su` uses the same PAM stack and has no TTY-origin restrictions.
+
+### Local shell (mod_cli)
+
+```
+portal:/> shell              # Local — forkpty + relay thread, no federation
+```
+
+`mod_cli` calls `forkpty()` directly, spawns a relay thread (PTY output → client fd). Keystrokes go raw to the PTY master fd via the editor's shell-mode passthrough.
+
+### Legacy message-based PTY (mod_shell, for automation)
+
+```
+PUT /shell/functions/exec?cmd=uptime
+PUT /shell/functions/open?rows=24&cols=80  → session_id
+PUT /shell/functions/write?session=<id>    (body: raw bytes)
+PUT /shell/functions/read?session=<id>     → available output
+PUT /shell/functions/resize?session=<id>&rows=40&cols=120
+PUT /shell/functions/close?session=<id>
+```
+
+PTY sessions use `forkpty()` with `TERM=xterm-256color`. This path runs `g_cfg.shell` (default `/bin/sh`) **as root** after the Portal-level ACL — the caller is assumed to have authenticated via `/auth/login` and hold the `access_label` group. Use only on trusted control planes.
+
+### Ctrl-]
+
+`Ctrl-]` (0x1D) in the CLI disconnects from any shell session cleanly, same semantics as telnet.
+
+### Configuration (mod_shell.conf)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `shell_port` | 2223 | Dial-back TLS listener port (0 = disable) |
+| `shell_bind` | 0.0.0.0 | Listener bind address |
+| `shell_tls_cert` | (federation cert) | TLS certificate path |
+| `shell_tls_key` | (federation key) | TLS private key path |
+| `shell_advertise_host` | auto-detect | Host the target dials back to |
+| `shell_login_binary` | `/bin/su` | Target-side login program |
+| `shell_dial_timeout` | 10 | Seconds to wait for dial-back (1–60) |
+| `access_label` | root | Group required to call shell paths |
+
+### Events
+
+All shell invocations emit `/events/shell/exec` or `/events/shell/session` for audit. Dial-back sessions log via `core->log` with the first 8 hex chars of `session_id` as a correlation tag.

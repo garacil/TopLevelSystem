@@ -224,7 +224,11 @@ $(MOD_HELLO): $(MOD_DIR)/mod_hello/mod_hello.c $(CORE_DIR)/core_message.c
 
 $(MOD_SHELL): $(MOD_DIR)/mod_shell/mod_shell.c $(CORE_DIR)/core_message.c
 	@echo "  SO    $@"
-	@$(CC) $(CFLAGS) -shared -fPIC -o $@ $^
+ifeq ($(HAS_SSL),yes)
+	@$(CC) $(CFLAGS) -DHAS_SSL -pthread -shared -fPIC -o $@ $^ $(SSL_LIBS) -lutil
+else
+	@$(CC) $(CFLAGS) -pthread -shared -fPIC -o $@ $^ -lutil
+endif
 
 $(MOD_MYAPP): $(MOD_DIR)/mod_myapp/mod_myapp.c $(CORE_DIR)/core_message.c
 	@echo "  SO    $@"

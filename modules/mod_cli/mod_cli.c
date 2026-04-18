@@ -1466,11 +1466,16 @@ static void handle_command(int fd, char *line)
             pid_t shell_pid = 0;
 
             if (peer && peer[0]) {
-                /* Remote shell: ask mod_node to open PTY on peer via /tunnel/shell */
+                /* Remote shell: ask mod_shell to open a dial-back channel to
+                 * the peer (federation carries only a tiny signal message;
+                 * the PTY bytes flow over a fresh dedicated TLS connection
+                 * the device opens back to us — zero federation pool usage,
+                 * and /bin/login runs on the device so PAM authenticates
+                 * the user). */
                 portal_msg_t *om = portal_msg_alloc();
                 portal_resp_t *or_resp = portal_resp_alloc();
                 if (om && or_resp) {
-                    portal_msg_set_path(om, "/node/functions/shell");
+                    portal_msg_set_path(om, "/shell/functions/open_remote");
                     portal_msg_set_method(om, PORTAL_METHOD_CALL);
                     portal_msg_add_header(om, "peer", peer);
                     char r_str[16], c_str[16];
@@ -1484,7 +1489,7 @@ static void handle_command(int fd, char *line)
                     if (or_resp->status == PORTAL_OK && or_resp->body && or_resp->body_len > 0) {
                         shell_fd = atoi((char *)or_resp->body);
                     } else {
-                        char err[128];
+                        char err[192];
                         snprintf(err, sizeof(err), "Failed to open shell on %s: %s\n",
                                  peer, or_resp->body ? (char *)or_resp->body : "peer unavailable");
                         send_str(fd, err);

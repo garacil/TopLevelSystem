@@ -386,38 +386,69 @@ Before releasing a module:
 
 ---
 
-## Remote Shell via Federation
+## Remote Shell (dial-back channel)
 
-Interactive terminal access to any federated peer. Uses real PTY (`forkpty()`) — htop, vi, and all interactive programs work bidirectionally.
+Interactive terminal access to any peer via a **dedicated TLS connection
+the target opens back to the initiator**. Real PTY, real PAM auth, zero
+federation worker burn.
 
 ```
-portal:/> shell              # Local shell on this machine
-portal:/> shell <peer_name>  # Remote shell via federation
+portal:/> shell              # Local — forkpty direct, no network
+portal:/> shell <peer_name>  # Remote — dial-back TLS channel
 Connected to <peer_name> (Ctrl-] to disconnect)
-root@remote:~# 
+
+<peer> login: monitor
+Password:                     ← /bin/su + PAM against /etc/shadow
+[monitor@peer ~]$
 ```
 
 ### How It Works
 
-The CLI `shell` command uses **dedicated relay threads** — the event loop is never blocked:
+Federation carries only a one-shot signal (`/shell/functions/dialback_request`
+with a random 32-byte `session_id`). The target spawns a pthread that
+opens a fresh TCP+TLS connection to the initiator's `shell_port`
+(default `2223`), announces the session_id, forks a PTY, drops
+privileges to `nobody`, and runs `/bin/su -l <user>`. All shell data
+flows over that private TLS connection — never through the federation
+worker pool.
 
-- **Local**: mod_cli forks a PTY directly, spawns a relay thread (PTY ↔ client fd)
-- **Remote**: mod_node opens a federation worker to the peer, sends `/tunnel/shell` (which forks a PTY on the remote side), then relays raw bytes in a background thread (worker fd ↔ socketpair ↔ client fd)
+- **Local** (`shell`): `mod_cli` forks a PTY directly, relay thread (PTY ↔ client fd).
+- **Remote** (`shell <peer>`): `mod_shell.open_remote` generates a session, signals the peer through federation, waits for the dial-back, hands the resulting bridge fd to the CLI. The target's `dialback_thread` does TCP + TLS + PAM auth via `/bin/su` + PTY relay on its own pthread.
 
-Both paths use the same relay pattern — only the "other end" differs (local PTY fd vs federation worker fd).
+See [`modules/mod_shell/README.md`](../modules/mod_shell/README.md) for the full protocol, security model, thread breakdown, and operational notes.
 
-mod_shell (`/shell/functions/*`) provides session-based PTY access for HTTP/API clients and automation. The CLI bypasses mod_shell for direct fd relay.
+### Why not `/bin/login`
 
-Configuration (`mod_shell.conf`):
+util-linux 2.40+ rejects `forkpty()`-allocated PTYs with `FATAL: bad tty`. `/bin/su` uses the same PAM stack (`account`, `auth`, `session`) without that restriction, so it works cleanly on any kernel PTY. Operators who have a getty-style wrapper and want `/bin/login` back can override `shell_login_binary` in config.
+
+### Why drop privileges before `/bin/su`
+
+Portal runs as root. `/bin/su` is SUID root; when invoked from root, PAM's `pam_rootok` lets it skip password auth entirely. The target-side PTY child must `setuid(nobody)` before exec so that PAM goes all the way through the auth stack. If the privilege drop fails, the login aborts — exec'ing `su` as root would be an unauthenticated root shell.
+
+### Configuration (`mod_shell.conf`)
+
 ```ini
 enabled = true
 [mod_shell]
+# Legacy message-based API (scripts/automation)
 timeout = 10         # Max seconds per stateless command
-shell = /bin/bash    # Shell binary
-allow_exec = true    # Safety switch
-max_output = 65536   # Max bytes per read
-session_ttl = 3600   # Auto-close inactive sessions after 1 hour
+shell = /bin/sh      # Shell for /shell/functions/{exec,open}
+allow_exec = true
+max_output = 65536
+session_ttl = 3600
+
+# Dial-back channel (CLI shell <peer>)
+shell_port           = 2223           # TLS listener port (0 = disabled)
+shell_bind           = 0.0.0.0
+shell_tls_cert       =                # Default: instance federation cert
+shell_tls_key        =                # Default: instance federation key
+shell_advertise_host =                # Host the target dials back to
+shell_login_binary   = /bin/su        # What runs after privilege drop
+shell_dial_timeout   = 10             # Seconds to wait for dial-back
+access_label         = root           # Group required on all shell paths
 ```
+
+The initiator must have `shell_port` open in its firewall. The target does not need any inbound rules — it only opens outbound connections. NAT'd / private-only devices work without port forwarding.
 
 ### CLI Help System
 
